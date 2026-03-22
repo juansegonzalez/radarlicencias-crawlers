@@ -14,7 +14,8 @@ build/
 
 # Scrapy
 .scrapy/
-data/
+# Crawl output at repo root only (do not ignore radarlicencias/data/*.txt)
+/data/
 *.json
 *.jsonl
 *.csv

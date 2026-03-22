@@ -1,0 +1,149 @@
+#
+# Search regions for Airbnb spider: towns / neighbourhoods mapped to municipalities.
+# Format: search_term|municipality (one per line). Spider always runs 53 municipalities first,
+# then these extra searches to get more listings past the 300-per-search cap. Duplicate listing
+# IDs are only requested once (detail dedup). Add more lines as needed.
+# Lines starting with # are ignored.
+#
+
+# Calvià (many listings; split by area)
+Magaluf|Calvià
+Palmanova|Calvià
+Santa Ponça|Calvià
+Peguera|Calvià
+Portals Nous|Calvià
+Bendinat|Calvià
+Costa d'en Blanes|Calvià
+Illetes|Calvià
+S'Illeta|Calvià
+Costa de la Calma|Calvià
+Son Ferrer|Calvià
+Cala Vinyes|Calvià
+Galatzó|Calvià
+Calvià|Calvià
+
+# Palma (capital; neighbourhoods)
+Palma de Mallorca|Palma
+El Terreno|Palma
+Portopi|Palma
+Cala Major|Palma
+Playa de Palma|Palma
+Can Pastilla|Palma
+S'Arenal|Palma
+Es Molinar|Palma
+Son Armadams|Palma
+Es Portixol|Palma
+Coll d'en Rabassa|Palma
+Gènova|Palma
+Es Secar de la Real|Palma
+Son Vida|Palma
+
+# Sóller / Tramuntana
+Port de Sóller|Sóller
+Sóller|Sóller
+Biniaraix|Sóller
+Fornalutx|Fornalutx
+Deià|Deià
+Valldemossa|Valldemossa
+Banyalbufar|Banyalbufar
+Estellencs|Estellencs
+Esporles|Esporles
+
+# Pollença / Alcúdia area
+Port de Pollença|Pollença
+Cala Sant Vicenç|Pollença
+Pollença|Pollença
+El Pinaret|Pollença
+Cala Carbó|Pollença
+Port d'Alcúdia|Alcúdia
+Alcúdia|Alcúdia
+Mal Pas|Alcúdia
+Bonaire|Alcúdia
+Alcanada|Alcúdia
+Muro|Muro
+Playa de Muro|Muro
+Can Picafort|Santa Margalida
+Santa Margalida|Santa Margalida
+Cala Agulla|Capdepera
+Cala Mesquida|Capdepera
+Cala Gat|Capdepera
+
+# Llevant (east)
+Cala Millor|Sant Llorenç des Cardassar
+Sant Llorenç des Cardassar|Sant Llorenç des Cardassar
+Cala Bona|Son Servera
+Son Servera|Son Servera
+Cala Bona|Sant Llorenç des Cardassar
+S'Illot|Sant Llorenç des Cardassar
+Porto Cristo|Manacor
+Manacor|Manacor
+Cales de Mallorca|Manacor
+Cala Murada|Manacor
+S'Illot|Manacor
+Cala Ratjada|Capdepera
+Capdepera|Capdepera
+Artà|Artà
+Cala Torta|Artà
+Canyamel|Capdepera
+
+# Migjorn (south)
+Cala d'Or|Santanyí
+Santanyí|Santanyí
+Cala Figuera|Santanyí
+Cala Santanyí|Santanyí
+Cala Llombards|Santanyí
+Cala Mondrago|Santanyí
+S'Alqueria Blanca|Santanyí
+Colonia de Sant Jordi|Ses Salines
+Ses Salines|Ses Salines
+Campos|Campos
+Sa Ràpita|Campos
+Llucmajor|Llucmajor
+S'Arenal|Llucmajor
+Cala Pi|Llucmajor
+Felanitx|Felanitx
+Porto Colom|Felanitx
+Cala Serena|Felanitx
+Porto Petro|Santanyí
+
+# Andratx
+Port d'Andratx|Andratx
+Andratx|Andratx
+S'Arracó|Andratx
+Sant Elm|Andratx
+Cala Egos|Andratx
+
+# Sa Pobla / interior
+Sa Pobla|Sa Pobla
+Mancor de la Vall|Mancor de la Vall
+Inca|Inca
+Binissalem|Binissalem
+Consell|Consell
+Santa Maria del Camí|Santa Maria del Camí
+Marratxí|Marratxí
+Pòrtol|Marratxí
+Bunyola|Bunyola
+Puigpunyent|Puigpunyent
+Alaró|Alaró
+Lloseta|Lloseta
+Campanet|Campanet
+Selva|Selva
+Escorca|Escorca
+
+# Pla / centre
+Sineu|Sineu
+Montuïri|Montuïri
+Porreres|Porreres
+Sant Joan|Sant Joan
+Vilafranca de Bonany|Vilafranca de Bonany
+Petra|Petra
+Llubí|Llubí
+Muro|Muro
+Sencelles|Sencelles
+Santa Eugènia|Santa Eugènia
+Algaida|Algaida
+Lloret de Vistalegre|Lloret de Vistalegre
+Costitx|Costitx
+Maria de la Salut|Maria de la Salut
+Ariany|Ariany
+Búger|Búger

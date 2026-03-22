@@ -1,0 +1,56 @@
+# 53 municipalities of Mallorca (official). One per line. Used as Airbnb search seeds.
+# Source: List of municipalities in Balearic Islands (Island = Mallorca).
+# Spider uses these to build one search per municipality (e.g. /s/MunicipalityName--Spain/homes).
+Alaró
+Alcúdia
+Algaida
+Andratx
+Ariany
+Artà
+Banyalbufar
+Binissalem
+Búger
+Bunyola
+Calvià
+Campanet
+Campos
+Capdepera
+Consell
+Costitx
+Deià
+Escorca
+Esporles
+Estellencs
+Felanitx
+Fornalutx
+Inca
+Lloret de Vistalegre
+Lloseta
+Llubí
+Llucmajor
+Manacor
+Mancor de la Vall
+Maria de la Salut
+Marratxí
+Montuïri
+Muro
+Palma
+Petra
+Sa Pobla
+Pollença
+Porreres
+Puigpunyent
+Ses Salines
+Sant Joan
+Sant Llorenç des Cardassar
+Santa Eugènia
+Santa Margalida
+Santa Maria del Camí
+Santanyí
+Selva
+Sencelles
+Sineu
+Sóller
+Son Servera
+Valldemossa
+Vilafranca de Bonany
