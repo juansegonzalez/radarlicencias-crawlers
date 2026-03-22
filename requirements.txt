@@ -1,0 +1,10 @@
+# Scrapy and Zyte API integration
+scrapy>=2.11.0
+scrapy-zyte-api>=0.32.0
+
+# JavaScript rendering for Consejo spider (no Zyte)
+scrapy-playwright>=0.0.33
+playwright>=1.49.0
+
+# Optional: for Scrapy Cloud CLI deploy
+# shub

@@ -1,0 +1,35 @@
+# OS / local noise
+.DS_Store
+stdout
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Scrapy
+.scrapy/
+data/
+*.json
+*.jsonl
+*.csv
+
+# Env and secrets
+.env
+.env.local
+*.pem
+radarlicencias/local_config.py
+
+# Scrapy Cloud deploy (project ID; optional to ignore so each dev can have their own)
+scrapinghub.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
