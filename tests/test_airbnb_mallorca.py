@@ -17,7 +17,13 @@ from radarlicencias.extractors.license import (
     extract_registration_number,
     normalize_registration,
 )
-from radarlicencias.spiders.airbnb_mallorca import AirbnbMallorcaSpider, _is_listing_url, _listing_key, _normalize_location
+from radarlicencias.spiders.airbnb_mallorca import (
+    AirbnbMallorcaSpider,
+    _extract_host_fields,
+    _is_listing_url,
+    _listing_key,
+    _normalize_location,
+)
 
 
 class TestListingKey(unittest.TestCase):
@@ -52,6 +58,66 @@ class TestNormalizeLocation(unittest.TestCase):
         self.assertEqual(_normalize_location(""), "")
         self.assertEqual(_normalize_location("Paris, France"), "")
         self.assertEqual(_normalize_location("Palma - Airbnb"), "")
+
+
+# Snippets from real PDP embedded JSON (PdpHostOverviewDefaultSection), anonymized IDs kept as in samples.
+_LISA_HOST_SNIPPET = (
+    'PdpHostOverviewDefaultSection","title":"Hosted by Lisa","overviewItems":'
+    '[{"__typename":"PdpSbuiBasicListItem","title":"Superhost"},'
+    '{"__typename":"PdpSbuiBasicListItem","title":"9 years hosting"}],'
+    '"hostAvatar":{"__typename":"Avatar","badge":"SUPER_HOST",'
+    '"loggingEventData":{"eventData":{"pdpContext":{"isSuperHost":"true","hostId":"134859446"}}}}'
+)
+
+_PRIORITY_HOST_SNIPPET = (
+    'PdpHostOverviewDefaultSection","title":"Hosted by Priority Villas","overviewItems":'
+    '[{"__typename":"PdpSbuiBasicListItem","title":"9 years hosting"}],'
+    '"hostAvatar":{"__typename":"Avatar","badge":null,'
+    '"loggingEventData":{"eventData":{"pdpContext":{"isSuperHost":"false","hostId":"149209395"}}}}'
+)
+
+_ATALAYA_HOST_SNIPPET = (
+    'PdpHostOverviewDefaultSection","title":"Hosted by Atalaya","overviewItems":'
+    '[{"__typename":"PdpSbuiBasicListItem","title":"New Host"}],'
+    '"hostAvatar":{"__typename":"Avatar","badge":null,'
+    '"loggingEventData":{"eventData":{"pdpContext":{"isSuperHost":"false","hostId":"750459928"}}}}'
+)
+
+
+class TestExtractHostFields(unittest.TestCase):
+    def test_lisa_superhost_nine_years(self):
+        h = _extract_host_fields(_LISA_HOST_SNIPPET)
+        self.assertEqual(h["host_name"], "Lisa")
+        self.assertEqual(h["host_url"], "https://www.airbnb.com/users/show/134859446")
+        self.assertEqual(h["host_years_hosting"], 9)
+        self.assertTrue(h["host_is_superhost"])
+
+    def test_priority_villas_nine_years_not_superhost(self):
+        h = _extract_host_fields(_PRIORITY_HOST_SNIPPET)
+        self.assertEqual(h["host_name"], "Priority Villas")
+        self.assertEqual(h["host_url"], "https://www.airbnb.com/users/show/149209395")
+        self.assertEqual(h["host_years_hosting"], 9)
+        self.assertFalse(h["host_is_superhost"])
+
+    def test_atalaya_new_host(self):
+        h = _extract_host_fields(_ATALAYA_HOST_SNIPPET)
+        self.assertEqual(h["host_name"], "Atalaya")
+        self.assertEqual(h["host_url"], "https://www.airbnb.com/users/show/750459928")
+        self.assertEqual(h["host_years_hosting"], 0)
+        self.assertFalse(h["host_is_superhost"])
+
+    def test_superhost_detected_from_title_only(self):
+        text = (
+            'PdpHostOverviewDefaultSection","title":"Hosted by Pat","overviewItems":'
+            '[{"title":"superhost"},{"title":"3 years hosting"}],'
+            '"hostAvatar":{"eventData":{"pdpContext":{"isSuperHost":"false","hostId":"1"}}}}'
+        )
+        h = _extract_host_fields(text)
+        self.assertTrue(h["host_is_superhost"])
+
+    def test_empty_when_no_section(self):
+        self.assertEqual(_extract_host_fields("")["host_name"], "")
+        self.assertEqual(_extract_host_fields("<html></html>")["host_url"], "")
 
 
 class TestLicenseExtractor(unittest.TestCase):

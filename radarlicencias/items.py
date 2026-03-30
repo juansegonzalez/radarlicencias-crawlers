@@ -35,6 +35,12 @@ class AirbnbListingItem(scrapy.Item):
     property_name = scrapy.Field()  # Listing title/name (e.g. "Cozy Apartment in Palma")
     picture_url = scrapy.Field()  # URL of the main listing photo
 
+    # Host (from HOST_OVERVIEW / PdpHostOverviewDefaultSection in embedded JSON)
+    host_name = scrapy.Field()  # Display name only, without "Hosted by " prefix
+    host_url = scrapy.Field()  # Public host profile URL (e.g. /users/show/<id>)
+    host_years_hosting = scrapy.Field()  # int: years from "N years hosting"; 0 for "New Host"; empty if unknown
+    host_is_superhost = scrapy.Field()  # bool
+
     # Optional / housekeeping
     listing_id = scrapy.Field()  # From URL or page (e.g. rooms/12345)
     max_guests = scrapy.Field()  # Maximum number of guests allowed (shown under listing name)

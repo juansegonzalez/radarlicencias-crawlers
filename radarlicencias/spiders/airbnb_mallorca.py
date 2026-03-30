@@ -727,6 +727,73 @@ def _extract_max_guests(response) -> str:
     return m.group(1) if m else ""
 
 
+# Host overview lives in embedded PDP JSON as PdpHostOverviewDefaultSection (stable __typename).
+_HOST_OVERVIEW_MARKER = "PdpHostOverviewDefaultSection"
+_YEARS_HOSTING_RE = re.compile(r"^(\d+)\s+years?\s+hosting\s*$", re.IGNORECASE)
+_NEW_HOST_RE = re.compile(r"^New Host\s*$", re.IGNORECASE)
+
+
+def _extract_host_fields(payload_text: str) -> dict:
+    """
+    Extract host name, profile URL, years hosting, and superhost flag from Airbnb's embedded JSON.
+
+    The listing HTML includes a PdpHostOverviewDefaultSection with title "Hosted by …",
+    overviewItems (Superhost, "N years hosting", "New Host"), and hostId in logging eventData.
+    """
+    out = {
+        "host_name": "",
+        "host_url": "",
+        "host_years_hosting": None,
+        "host_is_superhost": False,
+    }
+    if not payload_text:
+        return out
+
+    start = payload_text.find(_HOST_OVERVIEW_MARKER)
+    if start == -1:
+        return out
+
+    chunk = payload_text[start : start + 4500]
+
+    hosted_m = re.search(r'"title":"Hosted by ([^"]+)"', chunk)
+    if hosted_m:
+        out["host_name"] = hosted_m.group(1).strip()
+
+    host_id_m = re.search(r'"hostId":"(\d+)"', chunk)
+    if host_id_m:
+        out["host_url"] = f"https://www.airbnb.com/users/show/{host_id_m.group(1)}"
+
+    super_m = re.search(r'"isSuperHost":"(true|false)"', chunk)
+    if super_m and super_m.group(1) == "true":
+        out["host_is_superhost"] = True
+    if '"badge":"SUPER_HOST"' in chunk:
+        out["host_is_superhost"] = True
+
+    ov_start = chunk.find('"overviewItems"')
+    ha_start = chunk.find('"hostAvatar"', ov_start if ov_start != -1 else 0)
+    if ov_start != -1 and ha_start != -1 and ha_start > ov_start:
+        items_region = chunk[ov_start:ha_start]
+        years_set = False
+        for t_m in re.finditer(r'"title":"([^"]*)"', items_region):
+            title = t_m.group(1).strip()
+            if not title:
+                continue
+            if "superhost" in title.lower():
+                out["host_is_superhost"] = True
+            if _NEW_HOST_RE.match(title):
+                out["host_years_hosting"] = 0
+                years_set = True
+            else:
+                ym = _YEARS_HOSTING_RE.match(title)
+                if ym:
+                    out["host_years_hosting"] = int(ym.group(1))
+                    years_set = True
+        if not years_set:
+            out["host_years_hosting"] = None
+
+    return out
+
+
 def _listing_key(url: str) -> str:
     """Normalize listing URL to a stable key for deduplication (one request per listing)."""
     base = url.split("?")[0].strip().rstrip("/")
@@ -1035,6 +1102,7 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         max_guests = _extract_max_guests(html_response)
         property_name = _extract_property_name(html_response)
         picture_url = _extract_picture_url(text)
+        host_fields = _extract_host_fields(text)
 
         item = AirbnbListingItem(
             url=response.url,
@@ -1045,5 +1113,9 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             max_guests=max_guests,
             property_name=property_name,
             picture_url=picture_url,
+            host_name=host_fields["host_name"],
+            host_url=host_fields["host_url"],
+            host_years_hosting=host_fields["host_years_hosting"],
+            host_is_superhost=host_fields["host_is_superhost"],
         )
         yield item
