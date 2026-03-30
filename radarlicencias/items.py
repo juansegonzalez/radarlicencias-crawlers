@@ -41,6 +41,10 @@ class AirbnbListingItem(scrapy.Item):
     host_years_hosting = scrapy.Field()  # int: years from "N years hosting"; 0 for "New Host"; empty if unknown
     host_is_superhost = scrapy.Field()  # bool
 
+    # Guest-visible rating summary (embedded JSON; HTML fallback). None/null in feeds when new listing / no reviews.
+    rating = scrapy.Field()  # float, e.g. 4.94 or 5.0
+    review_count = scrapy.Field()  # int
+
     # Optional / housekeeping
     listing_id = scrapy.Field()  # From URL or page (e.g. rooms/12345)
     max_guests = scrapy.Field()  # Maximum number of guests allowed (shown under listing name)

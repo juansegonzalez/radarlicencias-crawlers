@@ -20,6 +20,7 @@ from radarlicencias.extractors.license import (
 from radarlicencias.spiders.airbnb_mallorca import (
     AirbnbMallorcaSpider,
     _extract_host_fields,
+    _extract_rating_and_reviews,
     _is_listing_url,
     _listing_key,
     _normalize_location,
@@ -118,6 +119,35 @@ class TestExtractHostFields(unittest.TestCase):
     def test_empty_when_no_section(self):
         self.assertEqual(_extract_host_fields("")["host_name"], "")
         self.assertEqual(_extract_host_fields("<html></html>")["host_url"], "")
+
+
+class TestExtractRatingAndReviews(unittest.TestCase):
+    def test_from_json_five_and_five(self):
+        text = '"guestSatisfactionOverall":5,"reviewCount":5'
+        r = _extract_rating_and_reviews(text)
+        self.assertEqual(r["rating"], 5.0)
+        self.assertEqual(r["review_count"], 5)
+
+    def test_from_json_decimal_reviews(self):
+        text = '"guestSatisfactionOverall":4.94,"reviewCount":33'
+        r = _extract_rating_and_reviews(text)
+        self.assertEqual(r["rating"], 4.94)
+        self.assertEqual(r["review_count"], 33)
+
+    def test_new_listing_null_and_zero(self):
+        text = '"guestSatisfactionOverall":null,"reviewCount":0'
+        r = _extract_rating_and_reviews(text)
+        self.assertIsNone(r["rating"])
+        self.assertIsNone(r["review_count"])
+
+    def test_html_fallback(self):
+        text = (
+            '<span class="a8jt5op">Rated 4.5 out of 5 stars.</span>'
+            '<span data-button-content="true" class="x">10 reviews</span>'
+        )
+        r = _extract_rating_and_reviews(text)
+        self.assertEqual(r["rating"], 4.5)
+        self.assertEqual(r["review_count"], 10)
 
 
 class TestLicenseExtractor(unittest.TestCase):

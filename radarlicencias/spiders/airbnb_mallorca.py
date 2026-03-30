@@ -794,6 +794,66 @@ def _extract_host_fields(payload_text: str) -> dict:
     return out
 
 
+# Listing aggregate rating in embedded PDP JSON (one main value per page in practice).
+_GUEST_SATISFACTION_JSON_RE = re.compile(
+    r'"guestSatisfactionOverall"\s*:\s*(null|\d+(?:\.\d+)?)'
+)
+_REVIEW_COUNT_JSON_RE = re.compile(r'"reviewCount"\s*:\s*(\d+)')
+_RATED_STARS_HTML_RE = re.compile(
+    r"Rated\s+([\d.]+)\s+out of 5 stars", re.IGNORECASE
+)
+# "5 reviews" / "33 reviews" in the reviews CTA (data-button-content span)
+_REVIEWS_SPAN_HTML_RE = re.compile(
+    r'data-button-content="true"[^>]*>\s*(\d+)\s+reviews\s*<', re.IGNORECASE
+)
+
+
+def _extract_rating_and_reviews(payload_text: str) -> dict:
+    """
+    Extract aggregate star rating and review count from PDP JSON, with HTML fallback.
+
+    New listings use reviewCount 0 and guestSatisfactionOverall null — both fields are
+    left unset (None) so feeds show blank/null, per product copy ("New listing").
+    """
+    out: dict = {"rating": None, "review_count": None}
+    if not payload_text:
+        return out
+
+    rc_m = _REVIEW_COUNT_JSON_RE.search(payload_text)
+    review_count = int(rc_m.group(1)) if rc_m else None
+
+    gso_m = _GUEST_SATISFACTION_JSON_RE.search(payload_text)
+    gso_raw = gso_m.group(1) if gso_m else None
+
+    if review_count is not None and review_count == 0:
+        return out
+
+    rating_val: float | None = None
+    if gso_raw and gso_raw != "null":
+        rating_val = float(gso_raw)
+
+    if review_count is not None and review_count > 0:
+        if rating_val is None:
+            hm = _RATED_STARS_HTML_RE.search(payload_text)
+            if hm:
+                rating_val = float(hm.group(1))
+        if rating_val is not None:
+            out["rating"] = rating_val
+            out["review_count"] = review_count
+            return out
+
+    # JSON review count missing: try visible "Rated X …" + "N reviews" in HTML
+    hm = _RATED_STARS_HTML_RE.search(payload_text)
+    rm = _REVIEWS_SPAN_HTML_RE.search(payload_text)
+    if hm and rm:
+        c = int(rm.group(1))
+        if c > 0:
+            out["rating"] = float(hm.group(1))
+            out["review_count"] = c
+
+    return out
+
+
 def _listing_key(url: str) -> str:
     """Normalize listing URL to a stable key for deduplication (one request per listing)."""
     base = url.split("?")[0].strip().rstrip("/")
@@ -1103,6 +1163,7 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         property_name = _extract_property_name(html_response)
         picture_url = _extract_picture_url(text)
         host_fields = _extract_host_fields(text)
+        rating_fields = _extract_rating_and_reviews(text)
 
         item = AirbnbListingItem(
             url=response.url,
@@ -1117,5 +1178,7 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             host_url=host_fields["host_url"],
             host_years_hosting=host_fields["host_years_hosting"],
             host_is_superhost=host_fields["host_is_superhost"],
+            rating=rating_fields["rating"],
+            review_count=rating_fields["review_count"],
         )
         yield item
