@@ -13,18 +13,18 @@ Periodic crawls **do not re-download or re-upload** when the object already exis
 3. **`AirbnbImageR2Pipeline`** (400) runs only for `AirbnbListingItem`:
    - Requires both `listing_id` and non-empty `picture_url`; otherwise skips (no error).
    - Object key: `airbnb/{listing_id}/main.webp`.
-   - If **R2 env vars are missing**: logs one warning for the run and skips all image work.
+   - If **R2 env vars are missing**: logs warnings; **`picture_r2_key` is set to `null`** on every item so feeds/schema include the field.
    - **`r2_object_exists` (head_object)** returns:
      - **True** → object present: set `picture_r2_key`, log reuse at **debug** (avoids log noise on large crawls).
      - **False** → object definitely missing (404 / NoSuchKey / NotFound): proceed to download + upload.
-     - **None** → could not determine (transient R2/API error, missing env on direct helper call): **do not upload** (avoids redundant work when the object may already exist); log **warning**; leave `picture_r2_key` unset.
+     - **None** → could not determine (transient R2/API error): **do not upload**; log **warning**; **`picture_r2_key` = `null`**.
    - **`download_and_upload_image_to_r2`**: validates `image/*`, minimum size **300×200** px (after decode), max width **1000** px, WebP, `Content-Type: image/webp`.
    - On upload success: sets `picture_r2_key`.
    - On upload failure or invalid image: sets `picture_r2_key` to `null`, logs warning; **item is not dropped**.
 
-## Environment variables (R2)
+## Configuration (R2)
 
-Set in the shell, `.env` (for local scripts that call `load_dotenv()`), or Scrapy Cloud project settings:
+Resolution is **per key**, in order: **`os.environ` first**, then **Scrapy settings** (`crawler.settings`), e.g. project settings on Scrapy Cloud. `radarlicencias.settings.base` declares empty defaults so the keys exist; dashboard overrides supply values.
 
 | Variable | Purpose |
 |----------|---------|
@@ -33,7 +33,11 @@ Set in the shell, `.env` (for local scripts that call `load_dotenv()`), or Scrap
 | `R2_BUCKET_NAME` | Bucket name |
 | `R2_ENDPOINT_URL` | R2 S3 API endpoint (account-specific) |
 
-Without these, the pipeline skips image processing and leaves `picture_r2_key` unset (except when explicitly set to `null` after a failed upload attempt when env **is** present).
+**Local:** `.env` / shell env, or `settings/local.py` if you set these on the Scrapy settings object.
+
+**Scrapy Cloud:** project **Settings** (same names) work without duplicating into env vars. Startup logs show `R2 config source=env`, `scrapy_settings`, or `mixed_env_and_scrapy_settings`.
+
+If nothing resolves, the pipeline sets **`picture_r2_key` to `null`** and logs `source=missing`.
 
 ## Code map
 

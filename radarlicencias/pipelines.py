@@ -7,7 +7,9 @@ from radarlicencias.items import AirbnbListingItem
 from radarlicencias.r2_image import (
     download_and_upload_image_to_r2,
     r2_env_configured,
+    r2_missing_env_names,
     r2_object_exists,
+    r2_resolve,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,20 +35,45 @@ class AirbnbImageR2Pipeline:
     """
     For Airbnb listings: ensure main photo exists in Cloudflare R2 at airbnb/<listing_id>/main.webp.
     Skips download/upload when the object already exists (periodic crawls).
+    Always sets picture_r2_key on the item (string or None) so feeds and Scrapy Cloud schema include the field.
     """
 
     def __init__(self):
         self._warned_missing_r2 = False
+        self._settings = None
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        p = cls()
+        p._settings = crawler.settings
+        return p
+
+    def open_spider(self, spider):
+        _cfg, missing, label = r2_resolve(self._settings)
+        if label != "missing":
+            logger.info(
+                "AirbnbImageR2Pipeline: R2 config source=%s; image pipeline active spider=%s",
+                label,
+                getattr(spider, "name", spider),
+            )
+        else:
+            logger.warning(
+                "AirbnbImageR2Pipeline: R2 config source=%s missing_keys=%s picture_r2_key=null for all items",
+                label,
+                ", ".join(missing) if missing else "(unknown)",
+            )
 
     def process_item(self, item, spider=None):
         if not isinstance(item, AirbnbListingItem):
             return item
 
-        if not r2_env_configured():
+        if not r2_env_configured(self._settings):
+            item["picture_r2_key"] = None
             if not self._warned_missing_r2:
+                missing = r2_missing_env_names(self._settings)
                 logger.warning(
-                    "AirbnbImageR2Pipeline: R2 env vars missing; skipping image pipeline. "
-                    "Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_ENDPOINT_URL."
+                    "AirbnbImageR2Pipeline: R2 config incomplete; picture_r2_key=null. Missing: %s",
+                    ", ".join(missing) if missing else "(unknown)",
                 )
                 self._warned_missing_r2 = True
             return item
@@ -56,19 +83,21 @@ class AirbnbImageR2Pipeline:
         listing_id_str = str(listing_id).strip() if listing_id is not None else ""
 
         if not listing_id_str:
-            logger.debug("AirbnbImageR2Pipeline: missing or empty listing_id, skip")
+            item["picture_r2_key"] = None
+            logger.debug("AirbnbImageR2Pipeline: missing or empty listing_id, picture_r2_key=null")
             return item
 
         if not picture_url or not str(picture_url).strip():
+            item["picture_r2_key"] = None
             logger.debug(
-                "AirbnbImageR2Pipeline: missing picture_url listing_id=%s, skip",
+                "AirbnbImageR2Pipeline: missing picture_url listing_id=%s, picture_r2_key=null",
                 listing_id_str,
             )
             return item
 
         object_key = f"airbnb/{listing_id_str}/main.webp"
 
-        exists = r2_object_exists(object_key)
+        exists = r2_object_exists(object_key, self._settings)
         if exists is True:
             item["picture_r2_key"] = object_key
             logger.debug(
@@ -78,14 +107,15 @@ class AirbnbImageR2Pipeline:
             )
             return item
         if exists is None:
+            item["picture_r2_key"] = None
             logger.warning(
-                "AirbnbImageR2Pipeline: could not verify R2 object; skipping upload listing_id=%s object_key=%s",
+                "AirbnbImageR2Pipeline: could not verify R2 object; picture_r2_key=null listing_id=%s object_key=%s",
                 listing_id_str,
                 object_key,
             )
             return item
 
-        ok = download_and_upload_image_to_r2(str(picture_url).strip(), object_key)
+        ok = download_and_upload_image_to_r2(str(picture_url).strip(), object_key, self._settings)
         if ok:
             item["picture_r2_key"] = object_key
             logger.info(
@@ -94,7 +124,6 @@ class AirbnbImageR2Pipeline:
                 object_key,
             )
         else:
-            # Explicit None so feeds/DB consumers can distinguish "attempted but failed" from "never set".
             item["picture_r2_key"] = None
             logger.warning(
                 "AirbnbImageR2Pipeline: upload failed listing_id=%s object_key=%s",
