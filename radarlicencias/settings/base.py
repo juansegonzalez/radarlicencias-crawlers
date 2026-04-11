@@ -35,10 +35,8 @@ RETRY_TIMES = 3
 RETRY_HTTP_CODES = [500, 502, 503, 504, 408, 429]
 
 # Pipelines (normalize text fields for cross-referencing; see pipelines.py)
-# Airbnb R2 image pipeline runs after text normalization; only touches AirbnbListingItem.
 ITEM_PIPELINES = {
     "radarlicencias.pipelines.RadarlicenciasPipeline": 300,
-    "radarlicencias.pipelines.AirbnbImageR2Pipeline": 400,
 }
 
 # Default feed: stdout so "scrapy crawl <spider>" produces output. Override in local.py (file) or Scrapy Cloud (job).
@@ -49,9 +47,3 @@ FEED_EXPORT_ENCODING = "utf-8"
 
 # Logging
 LOG_LEVEL = "INFO"
-
-# Cloudflare R2 (optional). Scrapy Cloud project settings often define these; per-key resolution also reads os.environ first (see radarlicencias.r2_image.r2_resolve).
-R2_ACCESS_KEY_ID = ""
-R2_SECRET_ACCESS_KEY = ""
-R2_BUCKET_NAME = ""
-R2_ENDPOINT_URL = ""
