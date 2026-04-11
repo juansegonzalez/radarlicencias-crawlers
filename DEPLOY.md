@@ -65,6 +65,9 @@ PYTHONPATH=. SCRAPY_SETTINGS_MODULE=radarlicencias.settings.local scrapy crawl a
 5. **Feed and runs:**  
    In the dashboard, set the **feed** (e.g. JSON Lines) for jobs, then run the spider `airbnb_mallorca` and set up **periodic jobs** (e.g. monthly) if needed.
 
+6. **Deploy fails with “Pip checks failed” / `awscli` vs `botocore`:**  
+   Scrapy Cloud’s image includes **awscli**, which pins **botocore** (e.g. `1.31.62`). The project pins **`boto3` / `botocore`** in `requirements.txt` to match so `shub deploy` passes dependency checks. Do not upgrade boto3 in requirements without checking compatibility with the platform’s awscli.
+
 ---
 
 ## Quick checklist before first run

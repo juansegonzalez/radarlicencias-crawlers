@@ -10,7 +10,9 @@ playwright>=1.49.0
 # shub
 
 # R2 image pipeline (radarlicencias/r2_image.py, pipelines)
-boto3>=1.34.0
+# Scrapy Cloud images include awscli 1.29.x which pins botocore==1.31.62; keep these aligned for pip-check.
+boto3==1.28.62
+botocore==1.31.62
 python-dotenv>=1.0.0
 
 # Image download + WebP upload (radarlicencias/r2_image.py)
