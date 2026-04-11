@@ -35,8 +35,10 @@ RETRY_TIMES = 3
 RETRY_HTTP_CODES = [500, 502, 503, 504, 408, 429]
 
 # Pipelines (normalize text fields for cross-referencing; see pipelines.py)
+# Airbnb R2 image pipeline runs after text normalization; only touches AirbnbListingItem.
 ITEM_PIPELINES = {
     "radarlicencias.pipelines.RadarlicenciasPipeline": 300,
+    "radarlicencias.pipelines.AirbnbImageR2Pipeline": 400,
 }
 
 # Default feed: stdout so "scrapy crawl <spider>" produces output. Override in local.py (file) or Scrapy Cloud (job).

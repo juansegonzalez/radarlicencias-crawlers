@@ -24,6 +24,8 @@ For local runs, set your Zyte API key:
 export ZYTE_API_KEY=your_key_here
 ```
 
+To mirror Airbnb listing photos to **Cloudflare R2** (stable `picture_r2_key` per listing), set `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, and `R2_ENDPOINT_URL`. Details: [docs/AIRBNB_R2_IMAGE_PIPELINE.md](docs/AIRBNB_R2_IMAGE_PIPELINE.md).
+
 ## Spiders
 
 | Spider              | Command                         | Purpose                    |

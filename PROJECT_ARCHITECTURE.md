@@ -49,7 +49,8 @@ radarlicencias-crawlers/
 └── radarlicencias/
     ├── __init__.py
     ├── items.py                  # MallorcaLicenseItem, AirbnbListingItem
-    ├── pipelines.py              # Validation, optional dedup
+    ├── pipelines.py              # Text normalization + Airbnb R2 image pipeline
+    ├── r2_image.py               # Cloudflare R2 (head_object, WebP upload helper)
     ├── middlewares.py            # Custom if needed
     ├── settings/
     │   ├── __init__.py
@@ -115,6 +116,7 @@ Crawl only **Airbnb properties in Mallorca** (e.g. via search “Mallorca” or 
 - **Concurrency**: Moderate (e.g. 4–8 per domain) to reduce block risk while still finishing in a reasonable time.
 - **Items**: One item class (e.g. `AirbnbListingItem`) with fields we define (id, url, title, location, price, etc.).
 - **Output**: One feed per run (e.g. `data/airbnb_mallorca_YYYYMMDD.jsonl`).
+- **Main listing photo**: The spider still yields `picture_url` (Airbnb CDN). **`AirbnbImageR2Pipeline`** mirrors the image to **Cloudflare R2** at a stable key `airbnb/<listing_id>/main.webp` and sets **`picture_r2_key`** on the item (object key only; no public URL in this repo). On repeat crawls, **`head_object`** skips re-upload when the object already exists. See **`docs/AIRBNB_R2_IMAGE_PIPELINE.md`**.
 
 ### Open points
 - Exact start URL(s) and pagination pattern (inspect in browser or with Zyte).
