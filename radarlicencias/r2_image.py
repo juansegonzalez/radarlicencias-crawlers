@@ -13,6 +13,8 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _MAX_WIDTH: Final = 1000
+_MIN_WIDTH: Final = 300
+_MIN_HEIGHT: Final = 200
 
 _R2_ENV = (
     "R2_ACCESS_KEY_ID",
@@ -20,6 +22,10 @@ _R2_ENV = (
     "R2_BUCKET_NAME",
     "R2_ENDPOINT_URL",
 )
+
+# One boto3 client per process (Scrapy worker); avoids reconnect overhead on large crawls.
+_r2_cached_client: Optional[object] = None
+_r2_cached_bucket: Optional[str] = None
 
 
 def _missing_r2_env() -> List[str]:
@@ -33,23 +39,27 @@ def r2_env_configured() -> bool:
 
 def _r2_client_and_bucket() -> Tuple[Optional[object], Optional[str]]:
     """Return (boto3 S3 client, bucket name) or (None, None) if env is incomplete."""
+    global _r2_cached_client, _r2_cached_bucket
+
     if not r2_env_configured():
         return None, None
-    client = boto3.client(
-        "s3",
-        endpoint_url=os.environ["R2_ENDPOINT_URL"].strip(),
-        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"].strip(),
-        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"].strip(),
-        region_name="auto",
-    )
-    bucket = os.environ["R2_BUCKET_NAME"].strip()
-    return client, bucket
+    if _r2_cached_client is None:
+        _r2_cached_client = boto3.client(
+            "s3",
+            endpoint_url=os.environ["R2_ENDPOINT_URL"].strip(),
+            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"].strip(),
+            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"].strip(),
+            region_name="auto",
+        )
+        _r2_cached_bucket = os.environ["R2_BUCKET_NAME"].strip()
+    return _r2_cached_client, _r2_cached_bucket
 
 
-def r2_object_exists(object_key: str) -> bool:
+def r2_object_exists(object_key: str) -> Optional[bool]:
     """
-    Return True if the object exists in R2 (head_object succeeds).
-    On missing credentials, not found, or API error: log when appropriate and return False.
+    True if the object exists (head_object succeeds).
+    False if definitely missing (404 / NoSuchKey / NotFound).
+    None if existence cannot be determined (missing env, transient or unexpected API error).
     """
     client, bucket = _r2_client_and_bucket()
     if not client:
@@ -57,7 +67,7 @@ def r2_object_exists(object_key: str) -> bool:
             "R2 head_object skipped: missing env vars: %s",
             ", ".join(_missing_r2_env()),
         )
-        return False
+        return None
     try:
         client.head_object(Bucket=bucket, Key=object_key)
         return True
@@ -66,18 +76,18 @@ def r2_object_exists(object_key: str) -> bool:
         if code in ("404", "NoSuchKey", "NotFound"):
             return False
         logger.error(
-            "R2 head_object failed listing_id_key=%s: %s",
+            "R2 head_object inconclusive object_key=%s: %s",
             object_key,
             e,
         )
-        return False
+        return None
     except BotoCoreError as e:
         logger.error(
-            "R2 head_object failed listing_id_key=%s: %s",
+            "R2 head_object inconclusive object_key=%s: %s",
             object_key,
             e,
         )
-        return False
+        return None
 
 
 def download_and_upload_image_to_r2(image_url: str, object_key: str) -> bool:
@@ -109,11 +119,21 @@ def download_and_upload_image_to_r2(image_url: str, object_key: str) -> bool:
         logger.error("Invalid image: %s", e)
         return False
 
+    w, h = img.size
+    if w < _MIN_WIDTH or h < _MIN_HEIGHT:
+        logger.error(
+            "Image too small: %sx%s (minimum %sx%s)",
+            w,
+            h,
+            _MIN_WIDTH,
+            _MIN_HEIGHT,
+        )
+        return False
+
     try:
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        w, h = img.size
         if w > _MAX_WIDTH:
             new_h = max(1, int(round(h * (_MAX_WIDTH / w))))
             img = img.resize((_MAX_WIDTH, new_h), Image.Resampling.LANCZOS)

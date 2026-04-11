@@ -1,7 +1,7 @@
 # Spider: Airbnb — Mallorca listings only.
 # Run monthly. Cheapest viable strategy: browserHtml for list/pagination (Airbnb loads search results via JS, so HTTP returns no links);
 # httpResponseBody for detail (registration text is in the initial HTML, no "Show more" needed).
-# See docs/AIRBNB_MALLORCA_STRATEGY_MUNICIPALITIES.md and docs/AIRBNB_MALLORCA_EXTRACTION.md.
+# See docs/AIRBNB_MALLORCA_ENTRY_POINT.md for search URL / pagination context.
 
 import json
 import os

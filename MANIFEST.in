@@ -1,2 +1,2 @@
-# Include data files so Scrapy Cloud deploy (egg) contains them.
-include etv_guardian/data/*.txt
+# Include data files so source distributions / deploy include them.
+include radarlicencias/data/*.txt

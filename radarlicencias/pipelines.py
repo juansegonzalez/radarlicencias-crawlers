@@ -68,10 +68,18 @@ class AirbnbImageR2Pipeline:
 
         object_key = f"airbnb/{listing_id_str}/main.webp"
 
-        if r2_object_exists(object_key):
+        exists = r2_object_exists(object_key)
+        if exists is True:
             item["picture_r2_key"] = object_key
-            logger.info(
+            logger.debug(
                 "AirbnbImageR2Pipeline: reused existing R2 image listing_id=%s object_key=%s",
+                listing_id_str,
+                object_key,
+            )
+            return item
+        if exists is None:
+            logger.warning(
+                "AirbnbImageR2Pipeline: could not verify R2 object; skipping upload listing_id=%s object_key=%s",
                 listing_id_str,
                 object_key,
             )
@@ -86,6 +94,7 @@ class AirbnbImageR2Pipeline:
                 object_key,
             )
         else:
+            # Explicit None so feeds/DB consumers can distinguish "attempted but failed" from "never set".
             item["picture_r2_key"] = None
             logger.warning(
                 "AirbnbImageR2Pipeline: upload failed listing_id=%s object_key=%s",

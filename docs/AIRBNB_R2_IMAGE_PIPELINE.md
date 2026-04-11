@@ -14,8 +14,11 @@ Periodic crawls **do not re-download or re-upload** when the object already exis
    - Requires both `listing_id` and non-empty `picture_url`; otherwise skips (no error).
    - Object key: `airbnb/{listing_id}/main.webp`.
    - If **R2 env vars are missing**: logs one warning for the run and skips all image work.
-   - If **`head_object`** succeeds: sets `picture_r2_key` to that key, logs **reuse**, done.
-   - Else: **`download_and_upload_image_to_r2`** (in `radarlicencias/r2_image.py`) downloads from `picture_url`, validates `image/*`, resizes to max width 1000px, WebP, uploads with `Content-Type: image/webp`.
+   - **`r2_object_exists` (head_object)** returns:
+     - **True** → object present: set `picture_r2_key`, log reuse at **debug** (avoids log noise on large crawls).
+     - **False** → object definitely missing (404 / NoSuchKey / NotFound): proceed to download + upload.
+     - **None** → could not determine (transient R2/API error, missing env on direct helper call): **do not upload** (avoids redundant work when the object may already exist); log **warning**; leave `picture_r2_key` unset.
+   - **`download_and_upload_image_to_r2`**: validates `image/*`, minimum size **300×200** px (after decode), max width **1000** px, WebP, `Content-Type: image/webp`.
    - On upload success: sets `picture_r2_key`.
    - On upload failure or invalid image: sets `picture_r2_key` to `null`, logs warning; **item is not dropped**.
 
@@ -63,7 +66,9 @@ print(p.process_item(item).get('picture_r2_key'))
 "
 ```
 
-Run twice with the same `listing_id`: the second run should log **reused existing R2 image**.
+Run twice with the same `listing_id`: the second run should reuse R2 (see **debug** logs if enabled).
+
+The boto3 S3 client is **cached for the process** after first use (`r2_image.py`).
 
 ## Dependencies
 

@@ -34,7 +34,8 @@ class AirbnbListingItem(scrapy.Item):
     description_text = scrapy.Field()  # Full listing description text (for audit/validation of extracted license)
     property_name = scrapy.Field()  # Listing title/name (e.g. "Cozy Apartment in Palma")
     picture_url = scrapy.Field()  # URL of the main listing photo (source for first-time R2 upload)
-    picture_r2_key = scrapy.Field()  # R2 object key e.g. airbnb/<listing_id>/main.webp (set by pipeline)
+    # R2 object key (e.g. airbnb/<id>/main.webp), None after a failed upload attempt, or unset if skipped/indeterminate.
+    picture_r2_key = scrapy.Field()
 
     # Host (from HOST_OVERVIEW / PdpHostOverviewDefaultSection in embedded JSON)
     host_name = scrapy.Field()  # Display name only, without "Hosted by " prefix

@@ -81,5 +81,5 @@ So we use the **search URL** as the single starting point and paginate; we do **
 
 - **Best place to initiate crawling:** the **search URL**.
 - **Method:** request search URLs with **Zyte browser rendering** (`browserHtml: true`), parse listing links/IDs from the DOM, then paginate by `items_offset`.
-- **Production strategy:** for maximum coverage, use a **map bbox grid** anchored to Mallorca and paginate each cell (see `docs/AIRBNB_MALLORCA_STRATEGY_GRID.md`).
+- **Production strategy:** the spider uses **per-municipality search regions** (see `radarlicencias/data/search_regions_mallorca.txt`) so coverage stays bounded and predictable.
 - **No directory:** there is no “directory” or sitemap that lists all Mallorca properties; search + pagination is the only way.
