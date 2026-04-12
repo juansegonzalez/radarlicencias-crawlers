@@ -49,7 +49,13 @@ In production (`httpResponseBody`), capacity often comes from **`embedded_json`*
 
 ## Observability (stats)
 
-Stats are prefixed with `airbnb_mallorca/` — including discovery counters, `max_guests_*`, registration counts, and risky-leaf pagination metrics. See spider `closed()` logging.
+Stats are prefixed with `airbnb_mallorca/`. They are **monitoring-only**: they do not change crawling, pagination, or field extraction.
+
+**Discovery:** `discovered_listing_ids_total`, `detail_pages_scheduled`, `duplicate_listing_ids_skipped`, `risky_leaf_pagination_leaves_started`, `risky_leaf_pagination_unique_ids_recovered` (plus existing internal counters such as `stayssearch_nodes_visited`, `leaf_nodes`, …).
+
+**Per detail item:** `items_total`, completeness (`items_missing_coordinates`, `items_missing_registration`, `items_missing_title`, `items_missing_max_guests`), `coordinates_missing` / `coordinates_present`, title quality (`title_rejected_invalid`, `title_short_length`), `max_guests_source_*` (overview_dom / embedded_json / limited_regex / none), registration source (`registration_source_*`), `max_guests_value_above_16`, `max_guests_value_zero_or_negative`. Legacy counters such as `items_with_registration`, `max_guests_emitted_from_*`, and `max_guests_validation_*` are still incremented for continuity.
+
+At spider shutdown, `closed()` logs a multi-line **`=== AIRBNB CRAWL SUMMARY ===`** block (percentages use `items_total`) and emits **WARNING** logs when configured drift thresholds are crossed (coordinates missing > 5%, registration missing > 10%, embedded_json share < 80%, or any `max_guests_value_above_16` > 0). Warnings do not stop the crawl.
 
 ## Tests
 

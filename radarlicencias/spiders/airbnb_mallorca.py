@@ -563,6 +563,94 @@ def _inc_airbnb_stat(spider, key: str, value: int = 1) -> None:
         c.stats.inc_value(f"airbnb_mallorca/{key}", value)
 
 
+# Production monitoring: map extraction provenance to stable stat keys (see docs/AIRBNB_PRODUCTION.md).
+_MAX_GUESTS_SOURCE_MONITOR_KEYS = {
+    "overview_dom": "max_guests_source_overview_dom",
+    "embedded_json": "max_guests_source_embedded_json",
+    "limited_regex": "max_guests_source_limited_regex",
+    "none": "max_guests_source_none",
+}
+_REGISTRATION_SOURCE_MONITOR_KEYS = {
+    "mallorca_regional_label": "registration_source_mallorca_regional_label",
+    "description_standalone": "registration_source_description_standalone",
+    "spain_national_derived": "registration_source_spain_national_derived",
+    "none": "registration_source_none",
+}
+
+
+def _record_airbnb_detail_monitoring_stats(spider, item: AirbnbListingItem) -> None:
+    """Increment production monitoring stats for one parsed detail item. Does not alter extraction."""
+    st = getattr(getattr(spider, "crawler", None), "stats", None)
+    if not st:
+        return
+
+    registration_number = (item.get("registration_number") or "").strip()
+    if registration_number:
+        st.inc_value("airbnb_mallorca/items_with_registration")
+    else:
+        st.inc_value("airbnb_mallorca/items_without_registration")
+        spider.logger.debug(
+            "No registration number on detail page (listing may have none or text not in response): %s",
+            item.get("url") or "",
+        )
+
+    max_guests = (item.get("max_guests") or "").strip()
+    max_guests_source = item.get("max_guests_source") or "none"
+    max_guests_validation_status = item.get("max_guests_validation_status") or ""
+
+    st.inc_value(f"airbnb_mallorca/max_guests_validation_{max_guests_validation_status}")
+    if max_guests:
+        st.inc_value("airbnb_mallorca/max_guests_nonempty_count")
+        st.inc_value(f"airbnb_mallorca/max_guests_emitted_from_{max_guests_source}")
+    if max_guests_validation_status == "above_airbnb_limit":
+        st.inc_value("airbnb_mallorca/max_guests_rejected_above_airbnb_limit")
+
+    st.inc_value("airbnb_mallorca/items_total")
+
+    lat, lon = item.get("latitude"), item.get("longitude")
+    if lat is None or lon is None:
+        st.inc_value("airbnb_mallorca/items_missing_coordinates")
+        st.inc_value("airbnb_mallorca/coordinates_missing")
+    else:
+        st.inc_value("airbnb_mallorca/coordinates_present")
+
+    if not registration_number:
+        st.inc_value("airbnb_mallorca/items_missing_registration")
+
+    property_name = (item.get("property_name") or "").strip()
+    if not property_name:
+        st.inc_value("airbnb_mallorca/items_missing_title")
+    else:
+        if not _is_plausible_listing_title(property_name):
+            st.inc_value("airbnb_mallorca/title_rejected_invalid")
+        elif len(property_name) < 10:
+            st.inc_value("airbnb_mallorca/title_short_length")
+
+    if not max_guests:
+        st.inc_value("airbnb_mallorca/items_missing_max_guests")
+
+    mg_key = _MAX_GUESTS_SOURCE_MONITOR_KEYS.get(
+        max_guests_source, _MAX_GUESTS_SOURCE_MONITOR_KEYS["none"]
+    )
+    st.inc_value(f"airbnb_mallorca/{mg_key}")
+
+    reg_src = item.get("registration_number_source") or "none"
+    rk = _REGISTRATION_SOURCE_MONITOR_KEYS.get(
+        reg_src, _REGISTRATION_SOURCE_MONITOR_KEYS["none"]
+    )
+    st.inc_value(f"airbnb_mallorca/{rk}")
+
+    if max_guests:
+        try:
+            n = int(max_guests)
+            if n > 16:
+                st.inc_value("airbnb_mallorca/max_guests_value_above_16")
+            if n <= 0:
+                st.inc_value("airbnb_mallorca/max_guests_value_zero_or_negative")
+        except ValueError:
+            pass
+
+
 _PROPERTY_TITLE_SKIP = frozenset(
     (
         "stayssearch",
@@ -1415,6 +1503,7 @@ class AirbnbMallorcaSpider(scrapy.Spider):
 
     def _yield_detail_request(self, listing_id: str, zyte_detail: dict):
         """Schedule one listing detail request with global dedup and stats."""
+        _inc_airbnb_stat(self, "discovered_listing_ids_total")
         url = f"https://www.airbnb.com/rooms/{listing_id}"
         key = _listing_key(url)
         if key in self._seen_listing_keys:
@@ -1636,6 +1725,7 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             listing_id = _extract_listing_id_from_result(result)
             if not listing_id:
                 continue
+            _inc_airbnb_stat(self, "discovered_listing_ids_total")
             url = f"https://www.airbnb.com/rooms/{listing_id}"
             key = _listing_key(url)
             if key in self._seen_listing_keys:
@@ -1738,53 +1828,84 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         if not getattr(self, "crawler", None) or not self.crawler.stats:
             return
         st = self.crawler.stats
-        g = lambda k: st.get_value(f"airbnb_mallorca/{k}") or 0
-        self.logger.info(
-            "Airbnb Mallorca discovery stats: stayssearch_nodes=%s leaf_nodes=%s internal_splits=%s "
-            "leaves_lt_page_size=%s leaves_forced_max_depth=%s leaves_forced_min_cell=%s "
-            "truncation_risk_leaves=%s forced_leaf_saturated_ge_page_size=%s "
-            "detail_pages_scheduled=%s duplicate_ids_skipped=%s "
-            "risky_pagination_leaves=%s risky_pagination_extra_requests=%s risky_unique_recovered=%s",
-            g("stayssearch_nodes_visited"),
-            g("leaf_nodes"),
-            g("internal_split_nodes"),
-            g("leaves_lt_page_size"),
-            g("leaves_forced_max_depth"),
-            g("leaves_forced_min_cell"),
-            g("truncation_risk_leaves"),
-            g("forced_leaf_saturated_ge_page_size"),
-            g("detail_pages_scheduled"),
-            g("duplicate_listing_ids_skipped"),
-            g("risky_leaf_pagination_leaves_started"),
-            g("risky_leaf_pagination_extra_requests"),
-            g("risky_leaf_pagination_unique_ids_recovered"),
-        )
-        with_reg = st.get_value("airbnb_mallorca/items_with_registration") or 0
-        without_reg = st.get_value("airbnb_mallorca/items_without_registration") or 0
-        total = with_reg + without_reg
-        if total:
-            pct = 100.0 * with_reg / total
-            self.logger.info(
-                "Airbnb Mallorca extraction summary: %s items with registration number, %s without (%.1f%% with reg)",
-                with_reg,
-                without_reg,
-                pct,
-            )
-        self.logger.info(
-            "Airbnb Mallorca max_guests stats: nonempty=%s rejected_gt_%s=%s "
-            "from_overview=%s from_json=%s from_limited_regex=%s "
-            "validation(valid=%s fallback_used=%s missing=%s above_limit=%s)",
-            g("max_guests_nonempty_count"),
-            AIRBNB_MAX_LISTING_GUEST_CAPACITY,
-            g("max_guests_rejected_above_airbnb_limit"),
-            g("max_guests_emitted_from_overview_dom"),
-            g("max_guests_emitted_from_embedded_json"),
-            g("max_guests_emitted_from_limited_regex"),
-            g("max_guests_validation_valid"),
-            g("max_guests_validation_fallback_used"),
-            g("max_guests_validation_missing"),
-            g("max_guests_validation_above_airbnb_limit"),
-        )
+        g = lambda k: int(st.get_value(f"airbnb_mallorca/{k}") or 0)
+
+        def pct(part: int, whole: int) -> float:
+            if whole <= 0:
+                return 0.0
+            return 100.0 * float(part) / float(whole)
+
+        items_total = g("items_total")
+        miss_coord = g("items_missing_coordinates")
+        miss_reg = g("items_missing_registration")
+        miss_title = g("items_missing_title")
+        miss_mg = g("items_missing_max_guests")
+        emb_json = g("max_guests_source_embedded_json")
+        above_16 = g("max_guests_value_above_16")
+
+        lines = [
+            "=== AIRBNB CRAWL SUMMARY ===",
+            f"items_total: {items_total}",
+            "",
+            "DISCOVERY",
+            f"- discovered_listing_ids_total: {g('discovered_listing_ids_total')}",
+            f"- detail_pages_scheduled: {g('detail_pages_scheduled')}",
+            f"- duplicates_skipped: {g('duplicate_listing_ids_skipped')}",
+            f"- pagination_leaves: {g('risky_leaf_pagination_leaves_started')}",
+            f"- pagination_recovered_ids: {g('risky_leaf_pagination_unique_ids_recovered')}",
+            "",
+            "COMPLETENESS",
+            f"- missing_coordinates: {miss_coord} ({pct(miss_coord, items_total):.1f}%)",
+            f"- missing_registration: {miss_reg} ({pct(miss_reg, items_total):.1f}%)",
+            f"- missing_title: {miss_title} ({pct(miss_title, items_total):.1f}%)",
+            f"- missing_max_guests: {miss_mg} ({pct(miss_mg, items_total):.1f}%)",
+            "",
+            "MAX_GUESTS",
+            f"- overview_dom: {g('max_guests_source_overview_dom')}",
+            f"- embedded_json: {g('max_guests_source_embedded_json')}",
+            f"- limited_regex: {g('max_guests_source_limited_regex')}",
+            f"- none: {g('max_guests_source_none')}",
+            f"- invalid_above_16: {above_16}",
+            f"- value_zero_or_negative: {g('max_guests_value_zero_or_negative')}",
+            "",
+            "REGISTRATION",
+            f"- mallorca_label: {g('registration_source_mallorca_regional_label')}",
+            f"- description: {g('registration_source_description_standalone')}",
+            f"- spain_national: {g('registration_source_spain_national_derived')}",
+            f"- none: {g('registration_source_none')}",
+            "",
+            "TITLE",
+            f"- rejected_invalid: {g('title_rejected_invalid')}",
+            f"- short_length: {g('title_short_length')}",
+            "",
+            "COORDINATES",
+            f"- missing: {g('coordinates_missing')}",
+            f"- present: {g('coordinates_present')}",
+        ]
+        summary = "\n".join(lines)
+        self.logger.info("\n%s", summary)
+
+        if items_total > 0:
+            if pct(miss_coord, items_total) > 5.0:
+                self.logger.warning(
+                    "Airbnb Mallorca drift: missing_coordinates %.1f%% exceeds 5%% threshold",
+                    pct(miss_coord, items_total),
+                )
+            if pct(miss_reg, items_total) > 10.0:
+                self.logger.warning(
+                    "Airbnb Mallorca drift: missing_registration %.1f%% exceeds 10%% threshold",
+                    pct(miss_reg, items_total),
+                )
+            if pct(emb_json, items_total) < 80.0:
+                self.logger.warning(
+                    "Airbnb Mallorca drift: max_guests_source_embedded_json %.1f%% is below 80%% threshold",
+                    pct(emb_json, items_total),
+                )
+            if above_16 > 0:
+                self.logger.warning(
+                    "Airbnb Mallorca drift: max_guests_value_above_16=%s (expected 0)",
+                    above_16,
+                )
 
     def parse_detail(self, response):
         # Only process successful responses; failed ones are retried by Scrapy
@@ -1804,17 +1925,6 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         )
         registration_number = registration_number or ""
 
-        # Stats for extraction rate (see summary at end of crawl)
-        if self.crawler.stats:
-            if registration_number:
-                self.crawler.stats.inc_value("airbnb_mallorca/items_with_registration")
-            else:
-                self.crawler.stats.inc_value("airbnb_mallorca/items_without_registration")
-                self.logger.debug(
-                    "No registration number on detail page (listing may have none or text not in response): %s",
-                    response.url,
-                )
-
         # Listing ID from URL for stable reference (same logic as dedup key)
         listing_id = _listing_key(response.url) if "/rooms/" in response.url else ""
 
@@ -1827,14 +1937,6 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         max_guests, max_guests_source, max_guests_validation_status = _extract_max_guests_meta(
             html_response, text
         )
-        if self.crawler.stats:
-            st = self.crawler.stats
-            st.inc_value(f"airbnb_mallorca/max_guests_validation_{max_guests_validation_status}")
-            if max_guests:
-                st.inc_value("airbnb_mallorca/max_guests_nonempty_count")
-                st.inc_value(f"airbnb_mallorca/max_guests_emitted_from_{max_guests_source}")
-            if max_guests_validation_status == "above_airbnb_limit":
-                st.inc_value("airbnb_mallorca/max_guests_rejected_above_airbnb_limit")
         property_name, property_name_source = _extract_property_name_with_source(html_response)
         picture_url = extract_picture_url(html_response, text)
         host_fields = _extract_host_fields_with_source(html_response, text)
@@ -1863,4 +1965,5 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             rating=rating_fields["rating"],
             review_count=rating_fields["review_count"],
         )
+        _record_airbnb_detail_monitoring_stats(self, item)
         yield item
