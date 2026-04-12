@@ -113,10 +113,10 @@ Crawl only **Airbnb properties in Mallorca** (e.g. via search “Mallorca” or 
   (We can also try to get enough from listing cards to avoid a detail page per listing and save cost.)
 - **Sessions**: Enable Zyte **sessions** if we see blocks (same session = same IP for a short run).
 - **Concurrency**: Moderate (e.g. 4–8 per domain) to reduce block risk while still finishing in a reasonable time.
-- **Items**: One item class (e.g. `AirbnbListingItem`) with fields we define (id, url, title, location, price, etc.).
+- **Items**: One item class (`AirbnbListingItem`) with fields including **url**, **location** (visible label), **latitude** / **longitude** (map coordinates when present in HTML), **registration_number**, **picture_url**, ratings, host fields, etc.
 - **Output**: One feed per run (e.g. `data/airbnb_mallorca_YYYYMMDD.jsonl`).
 - **Main listing photo**: The spider yields **`picture_url`** (Airbnb CDN). Image download, processing, and storage belong in downstream ingestion, not in this crawler.
-- **Detail-page parsing**: Field sources of truth (e.g. **`max_guests`** from the overview block `OVERVIEW_DEFAULT_V2` / `OVERVIEW_DEFAULT`, not full-page regex) are documented in **[docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md)**.
+- **Detail-page parsing**: Field sources of truth are documented in **[docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md)** — including **`max_guests`** from the overview block `OVERVIEW_DEFAULT_V2` / `OVERVIEW_DEFAULT` (not full-page regex), and **`latitude` / `longitude`** from map markers / embedded JSON (preferred over the `location` string for municipality validation).
 
 ### Open points
 - Exact start URL(s) and pagination pattern (inspect in browser or with Zyte).
