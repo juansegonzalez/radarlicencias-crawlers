@@ -94,34 +94,25 @@ Crawl the government site that lists tourist licenses in Mallorca.
 ## Spider 2: Airbnb Mallorca
 
 ### Role
-Crawl only **Airbnb properties in Mallorca** (e.g. via search “Mallorca” or region URLs).
+Discover and crawl **Airbnb listings in Mallorca** (map-bounded island search), then fetch **one detail page per listing** for license and metadata.
 
 ### Challenges
-- **Anti-bot**: Rate limits, blocks, captchas.
-- **JavaScript**: Listings and details are usually rendered in the browser.
-- **ToS**: Airbnb’s ToS typically restricts scraping; you’re choosing to run this for your use case.
-- **Scale**: “Mallorca only” keeps volume bounded (hundreds/low thousands of listings, not the whole site).
+- **Anti-bot**: Requests go through **Zyte API**.
+- **Discovery**: No public “all listings” URL; the spider uses **`StaysSearch` GraphQL + quadtree** (see [docs/AIRBNB_MALLORCA_ENTRY_POINT.md](docs/AIRBNB_MALLORCA_ENTRY_POINT.md)).
+- **ToS**: Airbnb’s ToS may restrict automated access; operational use is your responsibility.
+- **Scale**: Bounded by Mallorca bbox + deduplication.
 
-### Technical choices
-- **Zyte API**: Use **browser mode** (`browserHtml: true`) for listing and listing-detail pages so we get the rendered DOM.
-- **Entry URL**: Start from a Mallorca search, e.g.  
-  `https://www.airbnb.co.uk/s/Mallorca/homes` (or `.com`, same idea). Pagination and exact URL format to be confirmed when we implement.
-- **Flow**:  
-  1. Crawl search/listing pages.  
-  2. Extract listing URLs.  
-  3. Optionally crawl each listing detail page for full fields.  
-  (We can also try to get enough from listing cards to avoid a detail page per listing and save cost.)
-- **Sessions**: Enable Zyte **sessions** if we see blocks (same session = same IP for a short run).
-- **Concurrency**: Moderate (e.g. 4–8 per domain) to reduce block risk while still finishing in a reasonable time.
-- **Items**: One item class (`AirbnbListingItem`) with fields including **url**, **location** (visible label), **latitude** / **longitude** (map coordinates when present in HTML), **registration_number**, **picture_url**, ratings, host fields, etc.
-- **Output**: One feed per run (e.g. `data/airbnb_mallorca_YYYYMMDD.jsonl`).
-- **Main listing photo**: The spider yields **`picture_url`** (Airbnb CDN). Image download, processing, and storage belong in downstream ingestion, not in this crawler.
-- **Detail-page parsing**: Field sources of truth are documented in **[docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md)** — including **`max_guests`** from the overview block `OVERVIEW_DEFAULT_V2` / `OVERVIEW_DEFAULT` (not full-page regex), and **`latitude` / `longitude`** from map markers / embedded JSON (preferred over the `location` string for municipality validation).
+### Technical choices (implemented)
+- **Zyte API**: **Transparent mode**; listing detail requests use **`httpResponseBody`** (initial HTML + embedded JSON). Discovery uses **`httpResponseBody`** on `StaysSearch` POSTs.
+- **Discovery**: `StaysSearch` persisted query over Mallorca bbox; **split** when a node returns a full page (18 results); **optional `itemsOffset` pagination** on truncation-risk leaves only (`-a disable_risky_leaf_pagination=true` to turn off).
+- **Concurrency**: Spider-specific (see `airbnb_mallorca.py`); AutoThrottle enabled.
+- **Items**: `AirbnbListingItem` — url, location, coordinates, registration + provenance, **`max_guests` + `max_guests_source` + `max_guests_validation_status`**, property title + source, picture, host fields + source, ratings, etc.
+- **Output**: Feed export on Scrapy Cloud (e.g. JSON Lines).
+- **Detail parsing**: [docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md); **production reference:** [docs/AIRBNB_PRODUCTION.md](docs/AIRBNB_PRODUCTION.md).  
+  **`max_guests`:** overview DOM → **embedded JSON** (structured capacity) → limited header regex; values **> 16** are rejected. **`latitude` / `longitude`:** map `position` / JSON pairs.
 
 ### Open points
-- Exact start URL(s) and pagination pattern (inspect in browser or with Zyte).
-- Fields you need (from cards only vs cards + detail).
-- Whether to use Zyte’s automatic extraction for product-style pages (if they support it for Airbnb).
+- If Airbnb changes the `StaysSearch` persisted query hash, update `STAYSSEARCH_HASH` in `airbnb_mallorca.py` (see comments in spider).
 
 ---
 

@@ -1,10 +1,15 @@
-"""Tests for Airbnb listing max_guests extraction (overview vs description)."""
+"""Tests for Airbnb listing max_guests extraction (overview vs JSON vs description)."""
 
 import unittest
 
 from scrapy.http import HtmlResponse
 
-from radarlicencias.spiders.airbnb_mallorca import _extract_max_guests
+from radarlicencias.spiders.airbnb_mallorca import (
+    AIRBNB_MAX_LISTING_GUEST_CAPACITY,
+    _extract_max_guests,
+    _extract_max_guests_meta,
+    _extract_max_guests_with_source,
+)
 
 
 def _html_response(body: str) -> HtmlResponse:
@@ -68,6 +73,65 @@ class TestAirbnbMaxGuestsExtraction(unittest.TestCase):
         except Exception as e:  # pragma: no cover
             self.fail(f"extract raised: {e}")
         self.assertEqual(out, "3")
+
+    def test_provenance_overview_dom(self):
+        body = """
+        <section data-section-id="OVERVIEW_DEFAULT_V2"><ol><li>2 guests</li></ol></section>
+        """
+        val, src, st = _extract_max_guests_meta(_html_response(body), body)
+        self.assertEqual(val, "2")
+        self.assertEqual(src, "overview_dom")
+        self.assertEqual(st, "valid")
+
+    def test_provenance_limited_regex(self):
+        body = """
+        <header><span>3 guests</span></header>
+        <section data-section-id="DESCRIPTION_DEFAULT"><p>50 guests at party</p></section>
+        """
+        val, src, st = _extract_max_guests_meta(_html_response(body), body)
+        self.assertEqual(val, "3")
+        self.assertEqual(src, "limited_regex")
+        self.assertEqual(st, "fallback_used")
+
+    def test_embedded_json_person_capacity_when_no_overview(self):
+        body = """
+        <html><script>{"personCapacity":8,"foo":1}</script>
+        <section data-section-id="DESCRIPTION_DEFAULT"><p>up to 50 guests for events</p></section></html>
+        """
+        r = _html_response(body)
+        val, src, st = _extract_max_guests_meta(r, body)
+        self.assertEqual(val, "8")
+        self.assertEqual(src, "embedded_json")
+        self.assertEqual(st, "valid")
+
+    def test_rejects_capacity_above_airbnb_limit(self):
+        body = """
+        <section data-section-id="OVERVIEW_DEFAULT_V2"><ol><li>20 guests</li></ol></section>
+        """
+        val, src, st = _extract_max_guests_meta(_html_response(body), body)
+        self.assertEqual(val, "")
+        self.assertEqual(src, "overview_dom")
+        self.assertEqual(st, "above_airbnb_limit")
+
+    def test_json_capacity_rejects_over_limit(self):
+        body = '{"personCapacity":17}'
+        r = _html_response(f"<html>{body}</html>")
+        val, src, st = _extract_max_guests_meta(r, f"<html>{body}</html>")
+        self.assertEqual(val, "")
+        self.assertEqual(st, "above_airbnb_limit")
+
+    def test_overview_wins_before_json(self):
+        body = """
+        <section data-section-id="OVERVIEW_DEFAULT_V2"><ol><li>5 guests</li></ol></section>
+        {"personCapacity":9}
+        """
+        r = _html_response(body)
+        val, src, st = _extract_max_guests_meta(r, body)
+        self.assertEqual(val, "5")
+        self.assertEqual(src, "overview_dom")
+
+    def test_cap_constant_is_16(self):
+        self.assertEqual(AIRBNB_MAX_LISTING_GUEST_CAPACITY, 16)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,53 @@ Return type remains a **string** of digits (or empty), consistent with `AirbnbLi
 
 See `tests/test_airbnb_max_guests.py` for cases such as: overview “6 guests” vs description “50 guests”, `OVERVIEW_DEFAULT`, fallback before a description section, and malformed HTML without crashes.
 
+### Provenance (`max_guests_source` and `max_guests_validation_status`)
+
+The spider sets **`max_guests_source`** and **`max_guests_validation_status`** on each item.
+
+**`max_guests_source`**
+
+| Value | Meaning |
+|--------|--------|
+| `overview_dom` | Parsed from `OVERVIEW_DEFAULT_V2` / `OVERVIEW_DEFAULT` only. |
+| `embedded_json` | Listing capacity from structured JSON keys in the initial payload (e.g. `personCapacity`, `guestCapacity`) — not description prose. |
+| `limited_regex` | Header slice before DESCRIPTION / ABOUT (or first ~32k chars) — still avoids full description. |
+| `none` | No capacity found. |
+
+**`max_guests_validation_status`**
+
+| Value | Meaning |
+|--------|--------|
+| `valid` | Capacity from overview or embedded JSON, within Airbnb’s per-listing guest limit (16). |
+| `fallback_used` | Capacity from limited regex only, within limit. |
+| `above_airbnb_limit` | A number was found but rejected (&gt; 16); **`max_guests` is empty**. |
+| `missing` | No capacity after all steps. |
+
+Values above **16** are never emitted in **`max_guests`**.
+
+---
+
+## `registration_number` and `registration_number_source`
+
+**Extraction** is implemented in `radarlicencias/extractors/license.py` (`extract_registration_number_with_source`).
+
+Priority (unchanged):
+
+1. Mallorca regional registration block / structured patterns (`mallorca_regional_label`).
+2. Standalone ETV/ETVPL in description or page text, excluding tokens embedded in Spain national strings (`description_standalone`).
+3. Spain national `ESFCTU…` recovery (`spain_national_derived`).
+
+The normalized **`registration_number`** string format is unchanged. **`registration_number_source`** is for audits and feed quality checks.
+
+See `tests/test_license_registration.py`.
+
+---
+
+## Listing title and host (PDP)
+
+- **`property_name` / `property_name_source`**: Prefer `data-section-id="TITLE_DEFAULT"` (h1), then listing-specific JSON keys such as `listingTitle`, then legacy `name`/`title` scan and `<title>`. See `_extract_property_name_with_source` in `airbnb_mallorca.py` and `tests/test_airbnb_property_host.py`.
+- **`host_*` / `host_source`**: Prefer DOM sections `HOST_OVERVIEW_DEFAULT` and `MEET_YOUR_HOST` (primary host before co-host markers), then `PdpHostOverviewDefaultSection` JSON. See same tests.
+
 ---
 
 ## Related fields (pointers)
@@ -67,4 +114,5 @@ See `tests/test_airbnb_max_guests.py` for cases such as: overview “6 guests”
 |--------------|--------|
 | Coordinates (`latitude` / `longitude`) | Section above; `_extract_coordinates` in `airbnb_mallorca.py`; `tests/test_airbnb_coordinates.py` |
 | Hero image URL | `radarlicencias/extractors/airbnb_picture.py`, `tests/test_airbnb_picture.py` |
-| Registration number | `radarlicencias/extractors` (license patterns), description text |
+| Registration number | `radarlicencias/extractors` (license patterns), description text; provenance in `registration_number_source` |
+| Discovery (quadtree + risky pagination) | `airbnb_mallorca.py`, `docs/AIRBNB_MALLORCA_ENTRY_POINT.md`; payload tests in `tests/test_airbnb_discovery.py` |

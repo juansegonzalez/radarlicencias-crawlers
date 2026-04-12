@@ -12,7 +12,7 @@ from scrapy.exceptions import NotSupported
 from scrapy.http import HtmlResponse
 from urllib.parse import quote, urljoin
 from radarlicencias.items import AirbnbListingItem
-from radarlicencias.extractors import extract_registration_number
+from radarlicencias.extractors import extract_registration_number_with_source
 from radarlicencias.extractors.airbnb_picture import extract_picture_url
 
 # Mallorca bounding box (rough). Used as the root node for quadtree discovery.
@@ -27,6 +27,11 @@ MIN_CELL_LNG_SPAN = 0.01
 
 # StaysSearch JSON page size (what we saw in HAR / tests).
 STAYSSEARCH_PAGE_SIZE = 18
+
+# Risky saturated leaves: extra StaysSearch POSTs with itemsOffset (see parse_stayssearch_risky_pagination).
+RISKY_LEAF_MAX_PAGINATION_PAGES = 30
+# Hard cap on total offset per bbox (18 * 30 = 540) to bound cost if API ignores page size.
+RISKY_LEAF_MAX_OFFSET = STAYSSEARCH_PAGE_SIZE * RISKY_LEAF_MAX_PAGINATION_PAGES
 
 # StaysSearch persisted query hash (part of the /api/v3/StaysSearch/<hash> URL).
 # If Airbnb deploys a new frontend and discovery starts failing with 400 errors,
@@ -327,12 +332,16 @@ def _build_stayssearch_payload(
     sw_lng: float,
     ne_lat: float,
     ne_lng: float,
+    items_offset: int = 0,
 ) -> dict:
     """
     StaysSearch payload for a single map move over a bbox.
 
     This is based on a working payload captured from the Airbnb web UI.
     We keep most parameters stable and only substitute the bbox coordinates.
+
+    When items_offset > 0, adds rawParam itemsOffset (same mechanism as web search pagination).
+    Used only for risky saturated leaves (quadtree cannot subdivide further).
     """
     # Flags captured from the working request. These may change over time.
     treatment_flags = [
@@ -372,6 +381,11 @@ def _build_stayssearch_payload(
         {"filterName": "version", "filterValues": ["1.8.8"]},
         {"filterName": "zoomLevel", "filterValues": ["11"]},
     ]
+
+    if items_offset and items_offset > 0:
+        raw_params_common.append(
+            {"filterName": "itemsOffset", "filterValues": [str(int(items_offset))]}
+        )
 
     stays_search_request = {
         "metadataOnly": False,
@@ -542,40 +556,122 @@ def _response_text(response):
     return str(body)
 
 
-def _extract_property_name(response) -> str:
-    """Extract the property/listing name from Airbnb's embedded JSON or page title."""
+def _inc_airbnb_stat(spider, key: str, value: int = 1) -> None:
+    """Increment a crawl stat under airbnb_mallorca/<key> when crawler stats are available."""
+    c = getattr(spider, "crawler", None)
+    if c and c.stats:
+        c.stats.inc_value(f"airbnb_mallorca/{key}", value)
+
+
+_PROPERTY_TITLE_SKIP = frozenset(
+    (
+        "stayssearch",
+        "operationname",
+        "filtername",
+        "searchmode",
+        "flexibletriplengths",
+        "screensize",
+    )
+)
+# Experiment / feature-flag tokens that appear as JSON "name"/"title" on PDP — not listing titles.
+_PROPERTY_TITLE_REJECT_EXACT = frozenset(
+    ("treatment", "control", "variant", "holdout", "enabled", "disabled")
+)
+
+
+def _is_plausible_listing_title(name: str) -> bool:
+    # Reject very short / single-token junk (A/B flags, typos, noise).
+    if not name or len(name.strip()) < 3 or len(name) > 200:
+        return False
+    low = name.lower().strip()
+    if "airbnb" in low:
+        return False
+    if low in _PROPERTY_TITLE_REJECT_EXACT:
+        return False
+    if any(s in low for s in _PROPERTY_TITLE_SKIP):
+        return False
+    # Single generic word (often metadata), unless long enough to be a real title fragment.
+    if " " not in low and len(low) <= 12:
+        if low in (
+            "treatment",
+            "control",
+            "variant",
+            "default",
+            "loading",
+            "untitled",
+            "listing",
+            "property",
+            "home",
+            "title",
+        ):
+            return False
+    return True
+
+
+def _decode_json_string_fragment(raw: str) -> str:
+    try:
+        return json.loads(f'"{raw}"')
+    except Exception:
+        return raw
+
+
+def _extract_property_name_with_source(response) -> tuple[str, str]:
+    """Listing title: DOM TITLE_DEFAULT first, then listing-specific JSON keys, then legacy scan, then <title>."""
     text = _response_text(response)
 
+    # 1) Visible PDP title section (listing-specific; avoids unrelated JSON name keys).
+    for sid in ("TITLE_DEFAULT",):
+        section = response.css(f'[data-section-id="{sid}"]')
+        if not section:
+            continue
+        h1_parts = []
+        for h in section.css("h1"):
+            h1_parts.extend(t.strip() for t in h.xpath(".//text()").getall() if t and t.strip())
+        name = " ".join(h1_parts).strip()
+        name = re.sub(r"\s+", " ", name)
+        if _is_plausible_listing_title(name):
+            return name, "dom_title_section"
+
+    # 2) Embedded JSON keys that refer to the listing title on PDP (not generic search metadata).
+    for key in ("listingTitle", "pdpListingTitle", "sharingConfigTitle"):
+        pat = re.compile(rf'"{re.escape(key)}"\s*:\s*"([^"]{{2,300}})"', re.IGNORECASE)
+        for m in pat.finditer(text):
+            name = _decode_json_string_fragment(m.group(1).strip())
+            if _is_plausible_listing_title(name):
+                return name[:200], "embedded_listing_json"
+
+    # 3) Legacy broad scan (kept for older payloads; last resort before <title>).
     for pattern in (
         re.compile(r'"name"\s*:\s*"([^"]{2,120})"'),
         re.compile(r'"title"\s*:\s*"([^"]{2,120})"'),
     ):
         for m in pattern.finditer(text):
             name = m.group(1).strip()
-            if not name or "airbnb" in name.lower():
-                continue
-            if any(skip in name.lower() for skip in (
-                "stayssearch", "operationname", "filtername",
-                "searchmode", "flexibletriplengths", "screensize",
-            )):
+            if not _is_plausible_listing_title(name):
                 continue
             try:
                 name = json.loads(f'"{name}"')
             except Exception:
                 pass
-            if 2 <= len(name) <= 120:
-                return name
+            if _is_plausible_listing_title(name):
+                return name, "legacy_json_or_title"
 
     title_m = re.search(r"<title[^>]*>([^<]+)</title>", text, re.IGNORECASE)
     if title_m:
         title = title_m.group(1).strip()
         for suffix in (" - Airbnb", " | Airbnb", " · Airbnb"):
             if title.endswith(suffix):
-                title = title[:-len(suffix)].strip()
-        if 2 <= len(title) <= 120:
-            return title
+                title = title[: -len(suffix)].strip()
+        if _is_plausible_listing_title(title):
+            return title, "legacy_json_or_title"
 
-    return ""
+    return "", "none"
+
+
+def _extract_property_name(response) -> str:
+    """Backward-compatible wrapper; prefer _extract_property_name_with_source for provenance."""
+    name, _ = _extract_property_name_with_source(response)
+    return name
 
 
 def _extract_description_text(payload_text: str) -> str:
@@ -792,7 +888,11 @@ def _extract_location(response) -> str:
 
 # Max guests: capacity in the listing overview row under the title (e.g. "6 guests"), not prose in
 # the description (which may mention unrelated counts like "events for up to 50 guests").
-MAX_GUESTS_PATTERN = re.compile(r"\b(\d+)\s*guest(?:s)?\b", re.IGNORECASE)
+# English + Spanish guest labels (structured overview row; avoids broad multilingual regex on full page).
+MAX_GUESTS_PATTERN = re.compile(
+    r"\b(\d+)\s*(?:guest(?:s)?|huéspedes?|huespedes?|huésped|huesped)\b",
+    re.IGNORECASE,
+)
 
 # Airbnb PDP renders the visible stats row inside a stable section id (guests, bedrooms, beds, baths).
 _OVERVIEW_SECTION_IDS = ("OVERVIEW_DEFAULT_V2", "OVERVIEW_DEFAULT")
@@ -808,6 +908,55 @@ _MAX_GUESTS_FALLBACK_CUT_MARKERS = (
 
 # Last-resort cap (chars) if no cut marker exists — still avoids scanning unbounded megabyte payloads.
 _MAX_GUESTS_FALLBACK_HEAD_CHARS = 32000
+
+# Airbnb listing guest capacity is capped (platform rule); reject higher numbers as bad extraction.
+AIRBNB_MAX_LISTING_GUEST_CAPACITY = 16
+
+# Structured PDP payload only (not description prose): listing/guest capacity in embedded JSON.
+# Order: more specific keys first. Patterns are conservative to avoid unrelated "capacity" integers.
+_MAX_GUESTS_JSON_PATTERNS = (
+    re.compile(r'"personCapacity"\s*:\s*\{[^}]{0,600}?"total"\s*:\s*(\d{1,2})\b'),
+    re.compile(r'"personCapacity"\s*:\s*(\d{1,2})\b'),
+    re.compile(r'"maxGuestCapacity"\s*:\s*(\d{1,2})\b'),
+    re.compile(r'"totalGuestCapacity"\s*:\s*(\d{1,2})\b'),
+    re.compile(r'"listingGuestCapacity"\s*:\s*(\d{1,2})\b'),
+    re.compile(r'"guestCapacity"\s*:\s*(\d{1,2})\b'),
+)
+
+
+def _max_guests_from_embedded_json(payload_text: str) -> str:
+    """
+    Extract max guests from minified JSON in the initial HTML payload only.
+    Does not scan description_text or long prose blocks.
+    """
+    if not payload_text:
+        return ""
+    for rx in _MAX_GUESTS_JSON_PATTERNS:
+        m = rx.search(payload_text)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _finalize_max_guests_value(raw: str, source: str) -> tuple[str, str, str]:
+    """
+    Apply Airbnb capacity rule: 1..AIRBNB_MAX_LISTING_GUEST_CAPACITY inclusive; reject above.
+
+    Returns:
+        (max_guests_str_or_empty, source, validation_status)
+    """
+    if not raw or not str(raw).strip().isdigit():
+        return "", "none", "missing"
+    n = int(str(raw).strip())
+    if n < 1:
+        return "", "none", "missing"
+    if n > AIRBNB_MAX_LISTING_GUEST_CAPACITY:
+        # Do not emit invalid capacity; keep source where the bad number appeared.
+        return "", source, "above_airbnb_limit"
+    s = str(n)
+    if source == "limited_regex":
+        return s, source, "fallback_used"
+    return s, source, "valid"
 
 
 def _max_guests_from_overview_dom(response) -> str:
@@ -857,26 +1006,179 @@ def _max_guests_fallback_limited_regex(response) -> str:
     return m.group(1) if m else ""
 
 
-def _extract_max_guests(response) -> str:
-    """Extract maximum number of guests from the listing overview. Returns empty string if not found."""
-    out = _max_guests_from_overview_dom(response)
-    if out:
-        return out
-    return _max_guests_fallback_limited_regex(response)
+def _extract_max_guests_meta(html_response, payload_text: str) -> tuple[str, str, str]:
+    """
+    Max guests: overview DOM → embedded JSON (listing capacity only) → limited header regex.
+    Enforces AIRBNB_MAX_LISTING_GUEST_CAPACITY; values above are rejected (empty max_guests).
+
+    Returns:
+        (max_guests_str, source, validation_status)
+    """
+    raw = _max_guests_from_overview_dom(html_response)
+    if raw:
+        out, src, st = _finalize_max_guests_value(raw, "overview_dom")
+        if st == "above_airbnb_limit":
+            return out, src, st
+        if out:
+            return out, src, st
+
+    raw = _max_guests_from_embedded_json(payload_text)
+    if raw:
+        out, src, st = _finalize_max_guests_value(raw, "embedded_json")
+        if st == "above_airbnb_limit":
+            return out, src, st
+        if out:
+            return out, src, st
+
+    raw = _max_guests_fallback_limited_regex(html_response)
+    if raw:
+        return _finalize_max_guests_value(raw, "limited_regex")
+
+    return "", "none", "missing"
+
+
+def _extract_max_guests_with_source(html_response, payload_text: str) -> tuple[str, str]:
+    """Backward-compatible: (value, source) only; prefer _extract_max_guests_meta for validation status."""
+    out, src, _st = _extract_max_guests_meta(html_response, payload_text)
+    return out, src
+
+
+def _extract_max_guests(html_response, payload_text: str = "") -> str:
+    """Extract maximum number of guests. Pass payload_text for JSON fallback (same as detail page body)."""
+    out, _, _ = _extract_max_guests_meta(
+        html_response, payload_text or _response_text(html_response)
+    )
+    return out
 
 
 # Host overview lives in embedded PDP JSON as PdpHostOverviewDefaultSection (stable __typename).
 _HOST_OVERVIEW_MARKER = "PdpHostOverviewDefaultSection"
 _YEARS_HOSTING_RE = re.compile(r"^(\d+)\s+years?\s+hosting\s*$", re.IGNORECASE)
+_YEARS_HOSTING_ES_RE = re.compile(
+    r"^(\d+)\s+años?\s+como\s+anfitri[oó]n\s*$",
+    re.IGNORECASE,
+)
 _NEW_HOST_RE = re.compile(r"^New Host\s*$", re.IGNORECASE)
+_NEW_HOST_ES_RE = re.compile(r"^Anfitri[oó]n\s+nuevo\s*$", re.IGNORECASE)
+_HOSTED_BY_LINE_RE = re.compile(
+    r"(?:Hosted by|Anfitrionado por|Anfitri[oó]n(?:a|ado)? por)\s+(.+?)(?:\s*[·|]\s*|\s+Co-host|\s+Co-hosted|\s+Co-anfitrion|$)",
+    re.IGNORECASE,
+)
 
 
-def _extract_host_fields(payload_text: str) -> dict:
+def _clean_host_display_name(raw: str) -> str:
+    """Strip UI chrome and trailing years line from the same text blob as the host label."""
+    s = (raw or "").strip()
+    s = re.split(r"\s+(?:profile|photo|avatar|reviews)\b", s, maxsplit=1, flags=re.IGNORECASE)[0]
+    s = re.split(
+        r"\s+(?=\d+\s+(?:years?\s+hosting|años?\s+como\s+anfitri))",
+        s,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return re.sub(r"\s+", " ", s).strip()[:120]
+
+
+def _host_primary_blob_from_section(response, section_id: str) -> str:
+    """Plain text for a host-related section (primary host appears before co-host lines)."""
+    sec = response.css(f'[data-section-id="{section_id}"]')
+    if not sec:
+        return ""
+    parts = []
+    for t in sec.xpath(".//text()").getall():
+        if t and t.strip():
+            parts.append(t.strip())
+    return " ".join(parts)
+
+
+def _host_years_from_visible_text(blob: str):
+    """Parse years hosting from visible overview lines (EN/ES)."""
+    if not blob:
+        return None
+    for part in re.split(r"[\n·|]+", blob):
+        part = part.strip()
+        if not part:
+            continue
+        m = _YEARS_HOSTING_RE.match(part)
+        if m:
+            return int(m.group(1))
+        m = _YEARS_HOSTING_ES_RE.match(part)
+        if m:
+            return int(m.group(1))
+    # Single-line blobs (joined text nodes): search anywhere in the string.
+    m = re.search(r"(\d+)\s+years?\s+hosting\b", blob, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d+)\s+años?\s+como\s+anfitri[oó]n", blob, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _host_primary_before_cohost(blob: str) -> str:
+    """Text before co-host markers so we do not pick the co-host as the main host."""
+    if not blob:
+        return ""
+    parts = re.split(
+        r"Co(?:-)?hosted\s+by|Co-anfitrionado\s+por|Co-anfitri[oó]n",
+        blob,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )
+    return parts[0].strip()
+
+
+def _extract_host_fields_from_dom(response) -> tuple[dict, str]:
     """
-    Extract host name, profile URL, years hosting, and superhost flag from Airbnb's embedded JSON.
+    Prefer visible HOST_OVERVIEW_DEFAULT, then MEET_YOUR_HOST: primary host only (ignore co-hosts).
+    Returns (fields, source_tag for the section that supplied the display name, if any).
+    """
+    out = {
+        "host_name": "",
+        "host_url": "",
+        "host_years_hosting": None,
+        "host_is_superhost": False,
+    }
+    source = "none"
 
-    The listing HTML includes a PdpHostOverviewDefaultSection with title "Hosted by …",
-    overviewItems (Superhost, "N years hosting", "New Host"), and hostId in logging eventData.
+    for sid, tag in (
+        ("HOST_OVERVIEW_DEFAULT", "dom_host_overview"),
+        ("MEET_YOUR_HOST", "dom_meet_your_host"),
+    ):
+        blob = _host_primary_blob_from_section(response, sid)
+        if not blob:
+            continue
+        primary = _host_primary_before_cohost(blob)
+        m = _HOSTED_BY_LINE_RE.search(primary)
+        if m and not out["host_name"]:
+            name = _clean_host_display_name(m.group(1))
+            if 1 <= len(name) <= 120:
+                out["host_name"] = name
+                source = tag
+        if "superhost" in blob.lower() or "superanfitrión" in blob.lower() or "superanfitrion" in blob.lower():
+            out["host_is_superhost"] = True
+
+        yrs = _host_years_from_visible_text(primary)
+        if _NEW_HOST_RE.search(blob) or _NEW_HOST_ES_RE.search(blob):
+            out["host_years_hosting"] = 0
+        elif yrs is not None and out["host_years_hosting"] is None:
+            out["host_years_hosting"] = yrs
+
+        if not out["host_url"]:
+            for href in response.css(f'[data-section-id="{sid}"] a[href*="/users/show/"]::attr(href)').getall():
+                if not href:
+                    continue
+                m2 = re.search(r"/users/show/(\d+)", href)
+                if m2:
+                    out["host_url"] = f"https://www.airbnb.com/users/show/{m2.group(1)}"
+                    break
+
+    return out, source
+
+
+def _extract_host_fields_json(payload_text: str) -> dict:
+    """
+    Extract host fields from PdpHostOverviewDefaultSection JSON chunk (legacy path).
     """
     out = {
         "host_name": "",
@@ -918,7 +1220,7 @@ def _extract_host_fields(payload_text: str) -> dict:
                 continue
             if "superhost" in title.lower():
                 out["host_is_superhost"] = True
-            if _NEW_HOST_RE.match(title):
+            if _NEW_HOST_RE.match(title) or _NEW_HOST_ES_RE.match(title):
                 out["host_years_hosting"] = 0
                 years_set = True
             else:
@@ -926,10 +1228,38 @@ def _extract_host_fields(payload_text: str) -> dict:
                 if ym:
                     out["host_years_hosting"] = int(ym.group(1))
                     years_set = True
+                else:
+                    ym_es = _YEARS_HOSTING_ES_RE.match(title)
+                    if ym_es:
+                        out["host_years_hosting"] = int(ym_es.group(1))
+                        years_set = True
         if not years_set:
             out["host_years_hosting"] = None
 
     return out
+
+
+def _extract_host_fields_with_source(html_response, payload_text: str) -> dict:
+    """
+    Merge DOM host blocks (preferred) with embedded JSON fallback.
+    """
+    dom, dom_src = _extract_host_fields_from_dom(html_response)
+    js = _extract_host_fields_json(payload_text)
+    out = {
+        "host_name": dom["host_name"] or js["host_name"],
+        "host_url": dom["host_url"] or js["host_url"],
+        "host_years_hosting": dom["host_years_hosting"]
+        if dom["host_years_hosting"] is not None
+        else js["host_years_hosting"],
+        "host_is_superhost": dom["host_is_superhost"] or js["host_is_superhost"],
+        "host_source": dom_src if dom_src != "none" else ("json_embedded" if js["host_name"] or js["host_url"] else "none"),
+    }
+    return out
+
+
+def _extract_host_fields(payload_text: str) -> dict:
+    """Backward-compatible: JSON-only host extraction (no DOM). Prefer _extract_host_fields_with_source."""
+    return _extract_host_fields_json(payload_text)
 
 
 # Listing aggregate rating in embedded PDP JSON (one main value per page in practice).
@@ -943,6 +1273,9 @@ _RATED_STARS_HTML_RE = re.compile(
 # "5 reviews" / "33 reviews" in the reviews CTA (data-button-content span)
 _REVIEWS_SPAN_HTML_RE = re.compile(
     r'data-button-content="true"[^>]*>\s*(\d+)\s+reviews\s*<', re.IGNORECASE
+)
+_REVIEWS_SPAN_HTML_RE_ES = re.compile(
+    r'data-button-content="true"[^>]*>\s*(\d+)\s+reseñas\s*<', re.IGNORECASE
 )
 
 
@@ -980,9 +1313,11 @@ def _extract_rating_and_reviews(payload_text: str) -> dict:
             out["review_count"] = review_count
             return out
 
-    # JSON review count missing: try visible "Rated X …" + "N reviews" in HTML
+    # JSON review count missing: try visible "Rated X …" + "N reviews" / Spanish reseñas in HTML
     hm = _RATED_STARS_HTML_RE.search(payload_text)
-    rm = _REVIEWS_SPAN_HTML_RE.search(payload_text)
+    rm = _REVIEWS_SPAN_HTML_RE.search(payload_text) or _REVIEWS_SPAN_HTML_RE_ES.search(
+        payload_text
+    )
     if hm and rm:
         c = int(rm.group(1))
         if c > 0:
@@ -1032,6 +1367,13 @@ class AirbnbMallorcaSpider(scrapy.Spider):
     #   scrapy crawl airbnb_mallorca -a max_depth=12
     max_depth = 12
 
+    def __init__(self, *args, disable_risky_leaf_pagination=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        v = disable_risky_leaf_pagination
+        self.risky_leaf_pagination_enabled = not (
+            v is not None and str(v).strip().lower() in ("1", "true", "yes", "on")
+        )
+
     def start_requests(self):
         """
         Entry point: start from the full Mallorca bbox and drive discovery via
@@ -1071,14 +1413,44 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             },
         )
 
+    def _yield_detail_request(self, listing_id: str, zyte_detail: dict):
+        """Schedule one listing detail request with global dedup and stats."""
+        url = f"https://www.airbnb.com/rooms/{listing_id}"
+        key = _listing_key(url)
+        if key in self._seen_listing_keys:
+            _inc_airbnb_stat(self, "duplicate_listing_ids_skipped")
+            return
+        self._seen_listing_keys.add(key)
+        _inc_airbnb_stat(self, "detail_pages_scheduled")
+        yield scrapy.Request(
+            url,
+            callback=self.parse_detail,
+            errback=self.handle_detail_error,
+            dont_filter=True,
+            meta={
+                "zyte_api": zyte_detail,
+                "municipality": "Mallorca",
+            },
+        )
+
+    def _yield_details_for_results(self, search_results, zyte_detail: dict):
+        for result in search_results:
+            listing_id = _extract_listing_id_from_result(result)
+            if not listing_id:
+                continue
+            yield from self._yield_detail_request(listing_id, zyte_detail)
+
     def parse_stayssearch_node(self, response):
         """
         Handle a single StaysSearch JSON response for one bbox node.
 
         Rule:
         - len(searchResults) == 18 -> split bbox into 4 and recurse.
-        - len(searchResults) < 18  -> treat as leaf; schedule detail pages, no pagination.
+        - len(searchResults) < 18  -> treat as leaf; schedule detail pages only.
+        - Forced leaves (max depth or min cell) with a full page (>= 18): optional itemsOffset pagination.
         """
+        _inc_airbnb_stat(self, "stayssearch_nodes_visited")
+
         bbox = response.meta.get("bbox")
         depth = int(response.meta.get("depth", 0) or 0)
 
@@ -1099,18 +1471,16 @@ class AirbnbMallorcaSpider(scrapy.Spider):
 
         search_results = _extract_search_results(data)
         count = len(search_results)
-        leaf = count < STAYSSEARCH_PAGE_SIZE
+        is_natural_leaf = count < STAYSSEARCH_PAGE_SIZE
 
         self.logger.info(
-            "StaysSearch bbox=%s depth=%s results=%s leaf=%s",
+            "StaysSearch bbox=%s depth=%s results=%s natural_leaf=%s",
             bbox,
             depth,
             count,
-            leaf,
+            is_natural_leaf,
         )
         if count == 0:
-            # High-signal debug: when payload is accepted (200) but returns no results,
-            # log a compact view of the response so we can align to the correct JSON path.
             top_keys = list(data.keys()) if isinstance(data, dict) else []
             self.logger.warning(
                 "StaysSearch returned 0 results for bbox=%s depth=%s. top_keys=%s body_snippet=%r",
@@ -1121,85 +1491,89 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             )
 
         zyte_detail = {"httpResponseBody": True}
-
-        if leaf:
-            # Leaf node: schedule detail pages for all unique listing IDs.
-            for result in search_results:
-                listing_id = _extract_listing_id_from_result(result)
-                if not listing_id:
-                    continue
-                url = f"https://www.airbnb.com/rooms/{listing_id}"
-                key = _listing_key(url)
-                if key in self._seen_listing_keys:
-                    continue
-                self._seen_listing_keys.add(key)
-                yield scrapy.Request(
-                    url,
-                    callback=self.parse_detail,
-                    errback=self.handle_detail_error,
-                    dont_filter=True,
-                    meta={
-                        "zyte_api": zyte_detail,
-                        "municipality": "Mallorca",
-                    },
-                )
-            return
-
-        # Internal node: split bbox and recurse (no pagination).
-        max_depth = int(getattr(self, "max_depth", 12) or 12)
-        if depth >= max_depth:
-            # Depth cap reached: treat as leaf to ensure we still collect listings.
-            for result in search_results:
-                listing_id = _extract_listing_id_from_result(result)
-                if not listing_id:
-                    continue
-                url = f"https://www.airbnb.com/rooms/{listing_id}"
-                key = _listing_key(url)
-                if key in self._seen_listing_keys:
-                    continue
-                self._seen_listing_keys.add(key)
-                yield scrapy.Request(
-                    url,
-                    callback=self.parse_detail,
-                    errback=self.handle_detail_error,
-                    dont_filter=True,
-                    meta={
-                        "zyte_api": zyte_detail,
-                        "municipality": "Mallorca",
-                    },
-                )
-            return
-
-        if not bbox or len(bbox) != 4:
-            return
-        sw_lat, sw_lng, ne_lat, ne_lng = bbox
-        if (ne_lat - sw_lat) < MIN_CELL_LAT_SPAN or (ne_lng - sw_lng) < MIN_CELL_LNG_SPAN:
-            # Box is already very small; treat it as leaf even if capped.
-            for result in search_results:
-                listing_id = _extract_listing_id_from_result(result)
-                if not listing_id:
-                    continue
-                url = f"https://www.airbnb.com/rooms/{listing_id}"
-                key = _listing_key(url)
-                if key in self._seen_listing_keys:
-                    continue
-                self._seen_listing_keys.add(key)
-                yield scrapy.Request(
-                    url,
-                    callback=self.parse_detail,
-                    errback=self.handle_detail_error,
-                    dont_filter=True,
-                    meta={
-                        "zyte_api": zyte_detail,
-                        "municipality": "Mallorca",
-                    },
-                )
-            return
-
-        children = _split_bbox_quadtree(sw_lat, sw_lng, ne_lat, ne_lng)
         zyte_list_meta = {"httpResponseBody": True}
-        for child_bbox in children:
-            payload = _build_stayssearch_payload(*child_bbox)
+
+        if is_natural_leaf:
+            _inc_airbnb_stat(self, "leaf_nodes")
+            _inc_airbnb_stat(self, "leaves_lt_page_size")
+            yield from self._yield_details_for_results(search_results, zyte_detail)
+            return
+
+        # count == STAYSSEARCH_PAGE_SIZE (saturated page): split or forced leaf.
+        max_depth = int(getattr(self, "max_depth", 12) or 12)
+        forced_depth = depth >= max_depth
+        forced_min = False
+        if bbox and len(bbox) == 4:
+            sw_lat, sw_lng, ne_lat, ne_lng = bbox
+            forced_min = (ne_lat - sw_lat) < MIN_CELL_LAT_SPAN or (ne_lng - sw_lng) < MIN_CELL_LNG_SPAN
+        else:
+            sw_lat = sw_lng = ne_lat = ne_lng = None
+
+        if not forced_depth and not forced_min:
+            _inc_airbnb_stat(self, "internal_split_nodes")
+            if not bbox or len(bbox) != 4:
+                return
+            children = _split_bbox_quadtree(sw_lat, sw_lng, ne_lat, ne_lng)
+            for child_bbox in children:
+                payload = _build_stayssearch_payload(*child_bbox)
+                yield scrapy.Request(
+                    _stayssearch_url(),
+                    method="POST",
+                    body=json.dumps(payload),
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-airbnb-api-key": AIRBNB_WEB_API_KEY,
+                        "x-airbnb-graphql-platform": "web",
+                        "x-airbnb-supports-airlock-v2": "true",
+                    },
+                    dont_filter=True,
+                    callback=self.parse_stayssearch_node,
+                    errback=self.handle_list_error,
+                    meta={
+                        "zyte_api_automap": zyte_list_meta,
+                        "bbox": child_bbox,
+                        "depth": depth + 1,
+                        "dont_merge_cookies": True,
+                    },
+                )
+            return
+
+        # Forced leaf: cannot subdivide further.
+        _inc_airbnb_stat(self, "leaf_nodes")
+        if forced_depth:
+            _inc_airbnb_stat(self, "leaves_forced_max_depth")
+        if forced_min:
+            _inc_airbnb_stat(self, "leaves_forced_min_cell")
+
+        saturated = count >= STAYSSEARCH_PAGE_SIZE
+        if saturated:
+            _inc_airbnb_stat(self, "forced_leaf_saturated_ge_page_size")
+            _inc_airbnb_stat(self, "truncation_risk_leaves")
+            reason = "max_depth" if forced_depth else "min_cell"
+            self.logger.warning(
+                "Truncation-risk leaf: saturated results but quadtree cannot subdivide "
+                "(reason=%s depth=%s bbox=%s count=%s). First page scheduled; optional pagination=%s",
+                reason,
+                depth,
+                bbox,
+                count,
+                self.risky_leaf_pagination_enabled,
+            )
+
+        yield from self._yield_details_for_results(search_results, zyte_detail)
+
+        if (
+            saturated
+            and self.risky_leaf_pagination_enabled
+            and bbox
+            and len(bbox) == 4
+        ):
+            _inc_airbnb_stat(self, "risky_leaf_pagination_leaves_started")
+            next_offset = count
+            if next_offset >= RISKY_LEAF_MAX_OFFSET:
+                return
+            payload = _build_stayssearch_payload(*bbox, items_offset=next_offset)
+            reason = "max_depth" if forced_depth else "min_cell"
             yield scrapy.Request(
                 _stayssearch_url(),
                 method="POST",
@@ -1211,15 +1585,126 @@ class AirbnbMallorcaSpider(scrapy.Spider):
                     "x-airbnb-supports-airlock-v2": "true",
                 },
                 dont_filter=True,
-                callback=self.parse_stayssearch_node,
+                callback=self.parse_stayssearch_risky_pagination,
                 errback=self.handle_list_error,
                 meta={
                     "zyte_api_automap": zyte_list_meta,
-                    "bbox": child_bbox,
-                    "depth": depth + 1,
+                    "bbox": bbox,
+                    "depth": depth,
+                    "items_offset": next_offset,
+                    "pagination_seq": 1,
+                    "forced_reason": reason,
                     "dont_merge_cookies": True,
                 },
             )
+
+    def parse_stayssearch_risky_pagination(self, response):
+        """
+        Follow-up StaysSearch pages for truncation-risk leaves only (itemsOffset > 0).
+        Stops when a page adds no new unique ids, returns fewer than a full page, or caps hit.
+        """
+        _inc_airbnb_stat(self, "stayssearch_nodes_visited")
+        _inc_airbnb_stat(self, "risky_leaf_pagination_extra_requests")
+
+        bbox = response.meta.get("bbox")
+        depth = int(response.meta.get("depth", 0) or 0)
+        items_offset = int(response.meta.get("items_offset", 0) or 0)
+        pagination_seq = int(response.meta.get("pagination_seq", 0) or 0)
+        forced_reason = response.meta.get("forced_reason") or ""
+
+        if response.status != 200:
+            self.logger.warning(
+                "Risky leaf pagination HTTP %s bbox=%s offset=%s",
+                response.status,
+                bbox,
+                items_offset,
+            )
+            return
+
+        try:
+            data = json.loads(_response_text(response))
+        except json.JSONDecodeError:
+            self.logger.warning("Risky leaf pagination JSON decode failed bbox=%s offset=%s", bbox, items_offset)
+            return
+
+        search_results = _extract_search_results(data)
+        zyte_detail = {"httpResponseBody": True}
+        zyte_list_meta = {"httpResponseBody": True}
+
+        new_unique = 0
+        for result in search_results:
+            listing_id = _extract_listing_id_from_result(result)
+            if not listing_id:
+                continue
+            url = f"https://www.airbnb.com/rooms/{listing_id}"
+            key = _listing_key(url)
+            if key in self._seen_listing_keys:
+                _inc_airbnb_stat(self, "duplicate_listing_ids_skipped")
+                continue
+            self._seen_listing_keys.add(key)
+            new_unique += 1
+            _inc_airbnb_stat(self, "detail_pages_scheduled")
+            yield scrapy.Request(
+                url,
+                callback=self.parse_detail,
+                errback=self.handle_detail_error,
+                dont_filter=True,
+                meta={
+                    "zyte_api": zyte_detail,
+                    "municipality": "Mallorca",
+                },
+            )
+
+        _inc_airbnb_stat(self, "risky_leaf_pagination_unique_ids_recovered", new_unique)
+
+        if not search_results:
+            return
+        if new_unique == 0:
+            self.logger.info(
+                "Risky leaf pagination stop: no new unique ids (bbox=%s offset=%s)",
+                bbox,
+                items_offset,
+            )
+            return
+        if len(search_results) < STAYSSEARCH_PAGE_SIZE:
+            return
+
+        next_offset = items_offset + len(search_results)
+        if next_offset >= RISKY_LEAF_MAX_OFFSET:
+            self.logger.info("Risky leaf pagination stop: offset cap (%s)", RISKY_LEAF_MAX_OFFSET)
+            return
+        if pagination_seq >= RISKY_LEAF_MAX_PAGINATION_PAGES:
+            self.logger.info(
+                "Risky leaf pagination stop: page cap (%s)", RISKY_LEAF_MAX_PAGINATION_PAGES
+            )
+            return
+
+        if not bbox or len(bbox) != 4:
+            return
+
+        yield scrapy.Request(
+            _stayssearch_url(),
+            method="POST",
+            body=json.dumps(_build_stayssearch_payload(*bbox, items_offset=next_offset)),
+            headers={
+                "Content-Type": "application/json",
+                "x-airbnb-api-key": AIRBNB_WEB_API_KEY,
+                "x-airbnb-graphql-platform": "web",
+                "x-airbnb-supports-airlock-v2": "true",
+            },
+            dont_filter=True,
+            callback=self.parse_stayssearch_risky_pagination,
+            errback=self.handle_list_error,
+            meta={
+                "zyte_api_automap": zyte_list_meta,
+                "bbox": bbox,
+                "depth": depth,
+                "items_offset": next_offset,
+                "pagination_seq": pagination_seq + 1,
+                "forced_reason": forced_reason,
+                "dont_merge_cookies": True,
+            },
+        )
 
     def handle_list_error(self, failure):
         """Log failed list/discovery requests for re-run or debugging."""
@@ -1252,8 +1737,30 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         )
         if not getattr(self, "crawler", None) or not self.crawler.stats:
             return
-        with_reg = self.crawler.stats.get_value("airbnb_mallorca/items_with_registration") or 0
-        without_reg = self.crawler.stats.get_value("airbnb_mallorca/items_without_registration") or 0
+        st = self.crawler.stats
+        g = lambda k: st.get_value(f"airbnb_mallorca/{k}") or 0
+        self.logger.info(
+            "Airbnb Mallorca discovery stats: stayssearch_nodes=%s leaf_nodes=%s internal_splits=%s "
+            "leaves_lt_page_size=%s leaves_forced_max_depth=%s leaves_forced_min_cell=%s "
+            "truncation_risk_leaves=%s forced_leaf_saturated_ge_page_size=%s "
+            "detail_pages_scheduled=%s duplicate_ids_skipped=%s "
+            "risky_pagination_leaves=%s risky_pagination_extra_requests=%s risky_unique_recovered=%s",
+            g("stayssearch_nodes_visited"),
+            g("leaf_nodes"),
+            g("internal_split_nodes"),
+            g("leaves_lt_page_size"),
+            g("leaves_forced_max_depth"),
+            g("leaves_forced_min_cell"),
+            g("truncation_risk_leaves"),
+            g("forced_leaf_saturated_ge_page_size"),
+            g("detail_pages_scheduled"),
+            g("duplicate_listing_ids_skipped"),
+            g("risky_leaf_pagination_leaves_started"),
+            g("risky_leaf_pagination_extra_requests"),
+            g("risky_leaf_pagination_unique_ids_recovered"),
+        )
+        with_reg = st.get_value("airbnb_mallorca/items_with_registration") or 0
+        without_reg = st.get_value("airbnb_mallorca/items_without_registration") or 0
         total = with_reg + without_reg
         if total:
             pct = 100.0 * with_reg / total
@@ -1263,6 +1770,21 @@ class AirbnbMallorcaSpider(scrapy.Spider):
                 without_reg,
                 pct,
             )
+        self.logger.info(
+            "Airbnb Mallorca max_guests stats: nonempty=%s rejected_gt_%s=%s "
+            "from_overview=%s from_json=%s from_limited_regex=%s "
+            "validation(valid=%s fallback_used=%s missing=%s above_limit=%s)",
+            g("max_guests_nonempty_count"),
+            AIRBNB_MAX_LISTING_GUEST_CAPACITY,
+            g("max_guests_rejected_above_airbnb_limit"),
+            g("max_guests_emitted_from_overview_dom"),
+            g("max_guests_emitted_from_embedded_json"),
+            g("max_guests_emitted_from_limited_regex"),
+            g("max_guests_validation_valid"),
+            g("max_guests_validation_fallback_used"),
+            g("max_guests_validation_missing"),
+            g("max_guests_validation_above_airbnb_limit"),
+        )
 
     def parse_detail(self, response):
         # Only process successful responses; failed ones are retried by Scrapy
@@ -1277,7 +1799,10 @@ class AirbnbMallorcaSpider(scrapy.Spider):
 
         text = _response_text(response)
         description_text = _extract_description_text(text)
-        registration_number = extract_registration_number(text, description_text) or ""
+        registration_number, registration_number_source = extract_registration_number_with_source(
+            text, description_text
+        )
+        registration_number = registration_number or ""
 
         # Stats for extraction rate (see summary at end of crawl)
         if self.crawler.stats:
@@ -1299,10 +1824,20 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         location = _extract_location(html_response)
         # Approximate map coordinates when present (preferred over `location` for boundary/municipality checks).
         latitude, longitude = _extract_coordinates(html_response)
-        max_guests = _extract_max_guests(html_response)
-        property_name = _extract_property_name(html_response)
+        max_guests, max_guests_source, max_guests_validation_status = _extract_max_guests_meta(
+            html_response, text
+        )
+        if self.crawler.stats:
+            st = self.crawler.stats
+            st.inc_value(f"airbnb_mallorca/max_guests_validation_{max_guests_validation_status}")
+            if max_guests:
+                st.inc_value("airbnb_mallorca/max_guests_nonempty_count")
+                st.inc_value(f"airbnb_mallorca/max_guests_emitted_from_{max_guests_source}")
+            if max_guests_validation_status == "above_airbnb_limit":
+                st.inc_value("airbnb_mallorca/max_guests_rejected_above_airbnb_limit")
+        property_name, property_name_source = _extract_property_name_with_source(html_response)
         picture_url = extract_picture_url(html_response, text)
-        host_fields = _extract_host_fields(text)
+        host_fields = _extract_host_fields_with_source(html_response, text)
         rating_fields = _extract_rating_and_reviews(text)
 
         item = AirbnbListingItem(
@@ -1311,15 +1846,20 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             latitude=latitude,
             longitude=longitude,
             registration_number=registration_number,
+            registration_number_source=registration_number_source,
             description_text=description_text,
             listing_id=listing_id,
             max_guests=max_guests,
+            max_guests_source=max_guests_source,
+            max_guests_validation_status=max_guests_validation_status,
             property_name=property_name,
+            property_name_source=property_name_source,
             picture_url=picture_url,
             host_name=host_fields["host_name"],
             host_url=host_fields["host_url"],
             host_years_hosting=host_fields["host_years_hosting"],
             host_is_superhost=host_fields["host_is_superhost"],
+            host_source=host_fields["host_source"],
             rating=rating_fields["rating"],
             review_count=rating_fields["review_count"],
         )

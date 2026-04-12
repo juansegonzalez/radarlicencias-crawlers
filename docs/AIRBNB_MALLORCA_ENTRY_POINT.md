@@ -86,6 +86,18 @@ So we use the **search URL** as the single starting point and paginate; we do **
 
 ---
 
+## Current `airbnb_mallorca` implementation (StaysSearch + quadtree)
+
+The spider does **not** crawl HTML search pages for discovery. It POSTs Airbnb’s **`StaysSearch`** GraphQL operation (persisted query) with a **map bounding box** over Mallorca, then:
+
+1. **Quadtree:** If a response returns a **full page** of results (18 items, `STAYSSEARCH_PAGE_SIZE`), the bbox is split into four children and each child is queried. If the response returns **fewer than 18** results, the node is a **leaf** (no further splitting).
+2. **Truncation-risk leaves:** If the quadtree **cannot** subdivide further (**max depth** reached or **minimum cell size**), but the API still returns a **full page (≥ 18)**, that leaf may be **truncating** listings. The spider logs this and, by default, issues **additional StaysSearch requests** with **`itemsOffset`** in `rawParams` to recover more listing IDs (deduped globally). Disable with:  
+   `scrapy crawl airbnb_mallorca -a disable_risky_leaf_pagination=true`
+
+End-of-run logs include counters such as `stayssearch_nodes_visited`, `truncation_risk_leaves`, `risky_leaf_pagination_*`, and `duplicate_listing_ids_skipped`. See `parse_stayssearch_node` / `parse_stayssearch_risky_pagination` in `radarlicencias/spiders/airbnb_mallorca.py`.
+
+---
+
 ## See also
 
 - **[AIRBNB_DETAIL_EXTRACTION.md](AIRBNB_DETAIL_EXTRACTION.md)** — how listing **detail** pages are parsed (e.g. `max_guests` from the overview block, not arbitrary text on the page).

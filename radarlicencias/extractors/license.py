@@ -17,6 +17,12 @@ _BUILTIN_LICENSE_CODE = (
 
 _log = logging.getLogger(__name__)
 
+# Provenance for extract_registration_number_with_source (feeds / audits).
+REGISTRATION_SOURCE_NONE = "none"
+REGISTRATION_SOURCE_MALLORCA_REGIONAL_LABEL = "mallorca_regional_label"
+REGISTRATION_SOURCE_DESCRIPTION_STANDALONE = "description_standalone"
+REGISTRATION_SOURCE_SPAIN_NATIONAL_DERIVED = "spain_national_derived"
+
 
 def get_license_code() -> str:
     """Return LICENSE_CODE regex string from data/license_patterns.py or built-in. Log warning on load failure."""
@@ -24,6 +30,7 @@ def get_license_code() -> str:
     if os.path.isfile(path):
         try:
             import importlib.util
+
             spec = importlib.util.spec_from_file_location("license_patterns", path)
             if spec and spec.loader:
                 mod = importlib.util.module_from_spec(spec)
@@ -51,16 +58,33 @@ def _compile_patterns(license_code: str) -> tuple:
     dash = r"(?:-|–|—)"
 
     mallorca_regional = re.compile(
-        r"Mallorca\\s*" + dash + r"\\s*Regional\\s*registration\\s*number" + r"[^\S\n]*" + "\n+" + r"[^\S\n]*(" + license_code + r")",
+        r"Mallorca\\s*"
+        + dash
+        + r"\\s*Regional\\s*registration\\s*number"
+        + r"[^\S\n]*"
+        + "\n+"
+        + r"[^\S\n]*("
+        + license_code
+        + r")",
         re.IGNORECASE,
     )
     mallorca_regional_alt = re.compile(
-        r"Mallorca\\s+Regional\\s+Registration\\s+Number\\s*[:\\s]*" + r"[^\S\n]*" + "\n+" + r"[^\S\n]*(" + license_code + r")",
+        r"Mallorca\\s+Regional\\s+Registration\\s+Number\\s*[:\\s]*"
+        + r"[^\S\n]*"
+        + "\n+"
+        + r"[^\S\n]*("
+        + license_code
+        + r")",
         re.IGNORECASE,
     )
     registration_details = re.compile(
         r"Registration\\s+Details[\\s\\S]{0,1500}?"
-        r"Regional\\s*registration\\s*number" + r"[^\S\n]*" + "\n+" + r"[^\S\n]*(" + license_code + r")",
+        r"Regional\\s*registration\\s*number"
+        + r"[^\S\n]*"
+        + "\n+"
+        + r"[^\S\n]*("
+        + license_code
+        + r")",
         re.IGNORECASE,
     )
 
@@ -91,53 +115,67 @@ def _normalize_br(text: str) -> str:
     return re.sub(r"(?:[\\\\]u003cbr\s*/?>|<br\s*/?>)", "\n", text, flags=re.IGNORECASE)
 
 
-def extract_registration_number(text: str, description_text: str = "") -> str:
-    """Extract Mallorca registration number from page text. Returns normalized string or empty.
+def extract_registration_number_with_source(
+    text: str, description_text: str = ""
+) -> tuple[str, str]:
+    """Extract Mallorca registration number and how it was obtained.
 
-    Strategy (in priority order):
-    1. Mallorca Regional registration number label → ETV token on next line
-    2. Standalone ETV/ETVPL token in description text (not inside a Spain national reg string)
-    3. Spain national registration number (ESFCTU...ETV/digits) → drop last digit
+    Priority (unchanged from extract_registration_number):
+    1. Explicit Mallorca regional registration block / structured patterns (authoritative).
+    2. Standalone ETV/ETVPL in description or page text (not inside Spain national blob).
+    3. Spain national registration string — lowest priority recovery path.
+
+    Returns:
+        (normalized_registration_or_empty, one of REGISTRATION_SOURCE_* constants).
     """
     if not text and not description_text:
-        return ""
+        return "", REGISTRATION_SOURCE_NONE
 
     t = _normalize_br(text) if text else ""
 
-    # --- Strategy 1: Mallorca Regional label ---
+    # --- Strategy 1: Mallorca Regional label and structured blocks ---
     if t:
         m = _MALLORCA_REGIONAL_LABEL_RE.search(t)
         if m:
             after = t[m.end() : m.end() + 250]
             tok = _LICENSE_TOKEN_RE.search(after)
             if tok:
-                return normalize_registration(tok.group(0))
+                return normalize_registration(tok.group(0)), REGISTRATION_SOURCE_MALLORCA_REGIONAL_LABEL
 
         for pattern in _REGISTRATION_PATTERNS:
             m2 = pattern.search(t)
             if m2:
-                return normalize_registration(m2.group(1))
+                return normalize_registration(m2.group(1)), REGISTRATION_SOURCE_MALLORCA_REGIONAL_LABEL
 
-    # --- Strategy 2: Standalone ETV/ETVPL in description text ---
+    # --- Strategy 2: Standalone ETV/ETVPL (prefer description when provided) ---
     search_text = description_text or t
     result = _extract_standalone_etv(search_text)
     if result:
-        return result
+        return result, REGISTRATION_SOURCE_DESCRIPTION_STANDALONE
 
-    # --- Strategy 3: Spain national registration number (drop last digit) ---
+    # --- Strategy 3: Spain national (recovery only) ---
     result = _extract_from_spain_national(search_text)
     if result:
-        return result
+        return result, REGISTRATION_SOURCE_SPAIN_NATIONAL_DERIVED
 
     if description_text and search_text != t and t:
         result = _extract_standalone_etv(t)
         if result:
-            return result
+            return result, REGISTRATION_SOURCE_DESCRIPTION_STANDALONE
         result = _extract_from_spain_national(t)
         if result:
-            return result
+            return result, REGISTRATION_SOURCE_SPAIN_NATIONAL_DERIVED
 
-    return ""
+    return "", REGISTRATION_SOURCE_NONE
+
+
+def extract_registration_number(text: str, description_text: str = "") -> str:
+    """Extract Mallorca registration number from page text. Returns normalized string or empty.
+
+    Same logic as extract_registration_number_with_source but discards provenance.
+    """
+    reg, _ = extract_registration_number_with_source(text, description_text)
+    return reg
 
 
 def _extract_standalone_etv(text: str) -> str:

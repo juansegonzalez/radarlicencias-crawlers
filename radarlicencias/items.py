@@ -34,8 +34,12 @@ class AirbnbListingItem(scrapy.Item):
     latitude = scrapy.Field()  # float or None
     longitude = scrapy.Field()  # float or None
     registration_number = scrapy.Field()  # Mallorca Regional Registration Number (ETV/...) from expanded description
+    # How registration_number was obtained: mallorca_regional_label | description_standalone | spain_national_derived | none
+    registration_number_source = scrapy.Field()
     description_text = scrapy.Field()  # Full listing description text (for audit/validation of extracted license)
     property_name = scrapy.Field()  # Listing title/name (e.g. "Cozy Apartment in Palma")
+    # dom_title_section | embedded_listing_json | legacy_json_or_title | none
+    property_name_source = scrapy.Field()
     picture_url = scrapy.Field()  # URL of the main listing photo
 
     # Host (from HOST_OVERVIEW / PdpHostOverviewDefaultSection in embedded JSON)
@@ -43,6 +47,8 @@ class AirbnbListingItem(scrapy.Item):
     host_url = scrapy.Field()  # Public host profile URL (e.g. /users/show/<id>)
     host_years_hosting = scrapy.Field()  # int: years from "N years hosting"; 0 for "New Host"; empty if unknown
     host_is_superhost = scrapy.Field()  # bool
+    # dom_host_overview | dom_meet_your_host | json_embedded | none
+    host_source = scrapy.Field()
 
     # Guest-visible rating summary (embedded JSON; HTML fallback). None/null in feeds when new listing / no reviews.
     rating = scrapy.Field()  # float, e.g. 4.94 or 5.0
@@ -51,3 +57,7 @@ class AirbnbListingItem(scrapy.Item):
     # Optional / housekeeping
     listing_id = scrapy.Field()  # From URL or page (e.g. rooms/12345)
     max_guests = scrapy.Field()  # Maximum number of guests allowed (shown under listing name)
+    # overview_dom | embedded_json | limited_regex | none
+    max_guests_source = scrapy.Field()
+    # valid | above_airbnb_limit | missing | fallback_used
+    max_guests_validation_status = scrapy.Field()

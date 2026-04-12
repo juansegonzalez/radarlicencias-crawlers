@@ -40,7 +40,7 @@ PYTHONPATH=. SCRAPY_SETTINGS_MODULE=radarlicencias.settings.local scrapy crawl c
 PYTHONPATH=. SCRAPY_SETTINGS_MODULE=radarlicencias.settings.local scrapy crawl airbnb_mallorca
 ```
 
-Both spiders crawl all data (Consejo: all pages until no more; Airbnb: all 53 municipalities and all listing pages).
+Both spiders crawl all data (Consejo: all pages until no more; Airbnb: **StaysSearch + quadtree** over Mallorca with optional risky-leaf `itemsOffset` pagination — see [docs/AIRBNB_MALLORCA_ENTRY_POINT.md](docs/AIRBNB_MALLORCA_ENTRY_POINT.md)).
 
 ### License patterns from Consejo (optional but recommended)
 
@@ -58,6 +58,7 @@ See [docs/LICENSE_PATTERNS_FROM_CONSEJO.md](docs/LICENSE_PATTERNS_FROM_CONSEJO.m
 The project is **ready to deploy** to Scrapy Cloud. For full steps (local test, deploy, feed, periodic jobs), see **[DEPLOY.md](DEPLOY.md)**.
 
 - **Local test:** `SCRAPY_SETTINGS_MODULE=radarlicencias.settings.local scrapy crawl airbnb_mallorca`
+- **Airbnb:** disable risky-leaf StaysSearch pagination with `-a disable_risky_leaf_pagination=true` (default is enabled).
 - **Deploy:** `pip install shub && shub login && shub deploy`
 - Set **ZYTE_API_KEY** in project settings; configure feed in job/project settings.
 
@@ -65,4 +66,6 @@ The project is **ready to deploy** to Scrapy Cloud. For full steps (local test, 
 
 See [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) for design, settings, and open points (Consejo URL/fields, Airbnb pagination/fields).
 
-For **Airbnb listing detail** extraction rules — **`max_guests`** (overview section vs description), **`latitude` / `longitude`** (map `position` and JSON fallbacks vs ambiguous `location` text), and related tests — see [docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md).
+For **Airbnb** behavior in production (discovery, item fields, deploy checklist), see **[docs/AIRBNB_PRODUCTION.md](docs/AIRBNB_PRODUCTION.md)**.
+
+For **detail-page extraction** — **`max_guests`** (overview DOM → embedded JSON → limited regex; cap 16), **`latitude` / `longitude`**, registration provenance — see [docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md).
