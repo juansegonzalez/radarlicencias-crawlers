@@ -30,6 +30,9 @@ class AirbnbListingItem(scrapy.Item):
     # Core fields for matching
     url = scrapy.Field()  # Listing page URL
     location = scrapy.Field()  # Location shown on the listing page (e.g. "Palma, Spain"), usually above the map
+    # Approximate listing map coordinates when present in HTML (preferred over location text for municipality checks).
+    latitude = scrapy.Field()  # float or None
+    longitude = scrapy.Field()  # float or None
     registration_number = scrapy.Field()  # Mallorca Regional Registration Number (ETV/...) from expanded description
     description_text = scrapy.Field()  # Full listing description text (for audit/validation of extracted license)
     property_name = scrapy.Field()  # Listing title/name (e.g. "Cozy Apartment in Palma")

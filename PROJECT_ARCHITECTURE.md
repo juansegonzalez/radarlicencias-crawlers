@@ -116,6 +116,7 @@ Crawl only **Airbnb properties in Mallorca** (e.g. via search “Mallorca” or 
 - **Items**: One item class (e.g. `AirbnbListingItem`) with fields we define (id, url, title, location, price, etc.).
 - **Output**: One feed per run (e.g. `data/airbnb_mallorca_YYYYMMDD.jsonl`).
 - **Main listing photo**: The spider yields **`picture_url`** (Airbnb CDN). Image download, processing, and storage belong in downstream ingestion, not in this crawler.
+- **Detail-page parsing**: Field sources of truth (e.g. **`max_guests`** from the overview block `OVERVIEW_DEFAULT_V2` / `OVERVIEW_DEFAULT`, not full-page regex) are documented in **[docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md)**.
 
 ### Open points
 - Exact start URL(s) and pagination pattern (inspect in browser or with Zyte).

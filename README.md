@@ -64,3 +64,5 @@ The project is **ready to deploy** to Scrapy Cloud. For full steps (local test, 
 ## Architecture
 
 See [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) for design, settings, and open points (Consejo URL/fields, Airbnb pagination/fields).
+
+For **Airbnb listing detail** extraction rules (e.g. `max_guests` from the overview section vs description), see [docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md).

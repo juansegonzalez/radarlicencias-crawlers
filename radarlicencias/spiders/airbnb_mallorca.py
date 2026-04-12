@@ -13,6 +13,7 @@ from scrapy.http import HtmlResponse
 from urllib.parse import quote, urljoin
 from radarlicencias.items import AirbnbListingItem
 from radarlicencias.extractors import extract_registration_number
+from radarlicencias.extractors.airbnb_picture import extract_picture_url
 
 # Mallorca bounding box (rough). Used as the root node for quadtree discovery.
 MALLORCA_SW_LAT = 39.200
@@ -577,35 +578,6 @@ def _extract_property_name(response) -> str:
     return ""
 
 
-def _extract_picture_url(payload_text: str) -> str:
-    """Extract the main listing picture URL from Airbnb's embedded JSON payload."""
-    if not payload_text:
-        return ""
-
-    picture_re = re.compile(
-        r'"(?:pictureUrl|picture_url|baseUrl|url)"\s*:\s*"(https://a0\.muscache\.com/[^"]+)"'
-    )
-    for m in picture_re.finditer(payload_text):
-        url = m.group(1)
-        try:
-            url = json.loads(f'"{url}"')
-        except Exception:
-            pass
-        if "im/pictures/" in url or "im/photos/" in url:
-            return url
-
-    for m in picture_re.finditer(payload_text):
-        url = m.group(1)
-        try:
-            url = json.loads(f'"{url}"')
-        except Exception:
-            pass
-        if url.startswith("https://"):
-            return url
-
-    return ""
-
-
 def _extract_description_text(payload_text: str) -> str:
     """
     Extract the full listing description text from Airbnb's embedded JSON payload.
@@ -657,6 +629,108 @@ def _extract_description_text(payload_text: str) -> str:
     decoded = re.sub(r"<br\\s*/?>", "\n", decoded, flags=re.IGNORECASE)
     decoded = re.sub(r"<[^>]+>", "", decoded)
     return decoded.strip()
+
+
+def _parse_lat_lng_strings(lat_str: str, lng_str: str):
+    """
+    Parse two numeric strings into validated latitude/longitude floats.
+    Returns (lat, lng) or (None, None) if not numeric or out of range.
+    """
+    try:
+        lat = float((lat_str or "").strip())
+        lng = float((lng_str or "").strip())
+    except (ValueError, TypeError):
+        return None, None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+        return None, None
+    return lat, lng
+
+
+# Listing map markers (e.g. Google Maps Platform) expose the pin as position="lat,lng".
+_MAP_POSITION_ATTR_RE = re.compile(
+    r'\bposition\s*=\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+# Embedded PDP / JSON chunks: common key pairs for approximate listing coordinates.
+# Tuple entries are (regex, swap_groups): swap True means group1 is lng and group2 is lat.
+_JSON_LAT_LNG_PATTERNS = (
+    (
+        re.compile(
+            r'"latitude"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"longitude"\s*:\s*(-?\d+(?:\.\d+)?)',
+            re.IGNORECASE,
+        ),
+        False,
+    ),
+    (
+        re.compile(
+            r'"longitude"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"latitude"\s*:\s*(-?\d+(?:\.\d+)?)',
+            re.IGNORECASE,
+        ),
+        True,
+    ),
+    (
+        re.compile(
+            r'"lat"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"lng"\s*:\s*(-?\d+(?:\.\d+)?)',
+            re.IGNORECASE,
+        ),
+        False,
+    ),
+    (
+        re.compile(
+            r'"lng"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"lat"\s*:\s*(-?\d+(?:\.\d+)?)',
+            re.IGNORECASE,
+        ),
+        True,
+    ),
+)
+
+
+def _extract_coordinates(response):
+    """
+    Extract approximate listing coordinates from the room detail HTML.
+
+    Extraction order (first valid pair wins):
+    1) Map marker attributes — `position="lat,lng"` (e.g. gmp-advanced-marker). Airbnb pins the listing on
+       the map with explicit coordinates; this is the most reliable signal tied to the map UI.
+    2) Embedded JSON / script payloads — `"latitude"/"longitude"` or `"lat"/"lng"` pairs as they appear in
+       minified PDP data (fallback when markers are absent or obfuscated).
+
+    Why prefer coordinates over the human-readable `location` string: labels like "Palma, Spain" or
+    "S'Estanyol, Illes Balears, Spain" are ambiguous for downstream municipality validation; lat/lng can be
+    reverse-geocoded or checked against boundaries deterministically.
+
+    Returns:
+        (latitude, longitude) as floats when a valid pair is found, else (None, None).
+    """
+    text = _response_text(response)
+    if not text:
+        return None, None
+
+    # 1) Map marker position="lat,lng" (comma-separated numbers; skip non-numeric junk).
+    for m in _MAP_POSITION_ATTR_RE.finditer(text):
+        raw = (m.group(1) or "").strip()
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if len(parts) != 2:
+            continue
+        lat, lng = _parse_lat_lng_strings(parts[0], parts[1])
+        if lat is not None:
+            return lat, lng
+
+    # 2) JSON-like lat/lng pairs in page payload (first valid match per pattern, patterns in sensible order).
+    for rx, swap in _JSON_LAT_LNG_PATTERNS:
+        jm = rx.search(text)
+        if not jm:
+            continue
+        a, b = jm.group(1), jm.group(2)
+        if swap:
+            lat, lng = _parse_lat_lng_strings(b, a)
+        else:
+            lat, lng = _parse_lat_lng_strings(a, b)
+        if lat is not None:
+            return lat, lng
+
+    return None, None
 
 
 def _extract_location(response) -> str:
@@ -716,15 +790,79 @@ def _extract_location(response) -> str:
     return ""
 
 
-# Max guests: number shown under listing name (e.g. "4 guests" or "· 4 guests · 2 bedrooms").
+# Max guests: capacity in the listing overview row under the title (e.g. "6 guests"), not prose in
+# the description (which may mention unrelated counts like "events for up to 50 guests").
 MAX_GUESTS_PATTERN = re.compile(r"\b(\d+)\s*guest(?:s)?\b", re.IGNORECASE)
+
+# Airbnb PDP renders the visible stats row inside a stable section id (guests, bedrooms, beds, baths).
+_OVERVIEW_SECTION_IDS = ("OVERVIEW_DEFAULT_V2", "OVERVIEW_DEFAULT")
+
+# When structured overview markup is missing, cut HTML before these markers so a regex fallback
+# does not read the long-form description (where misleading "N guests" phrases often appear).
+_MAX_GUESTS_FALLBACK_CUT_MARKERS = (
+    'data-section-id="DESCRIPTION',
+    "data-section-id='DESCRIPTION",
+    'data-section-id="ABOUT_DEFAULT',
+    "data-section-id='ABOUT_DEFAULT",
+)
+
+# Last-resort cap (chars) if no cut marker exists — still avoids scanning unbounded megabyte payloads.
+_MAX_GUESTS_FALLBACK_HEAD_CHARS = 32000
+
+
+def _max_guests_from_overview_dom(response) -> str:
+    """
+    Prefer the visible overview block near the title (OVERVIEW_DEFAULT_V2 / OVERVIEW_DEFAULT).
+
+    Full-document regex is unsafe: the description JSON/HTML often appears before or after the
+    overview in the raw text order, and phrases like "up to 50 guests" must not override the real
+    capacity shown in the overview row.
+    """
+    for sid in _OVERVIEW_SECTION_IDS:
+        section = response.css(f'[data-section-id="{sid}"]')
+        if not section:
+            continue
+        for li in section.css("li"):
+            combined = " ".join(
+                t.strip() for t in li.xpath(".//text()").getall() if t and t.strip()
+            )
+            m = MAX_GUESTS_PATTERN.search(combined)
+            if m:
+                return m.group(1)
+        scoped = " ".join(t.strip() for t in section.xpath(".//text()").getall() if t and t.strip())
+        m = MAX_GUESTS_PATTERN.search(scoped)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _max_guests_fallback_limited_regex(response) -> str:
+    """
+    If DOM overview extraction failed, search a header-sized slice only — never the full document.
+
+    Prefer text before DESCRIPTION / ABOUT sections; otherwise only the first _MAX_GUESTS_FALLBACK_HEAD_CHARS
+    so description paragraphs are unlikely to dominate the match.
+    """
+    text = _response_text(response)
+    if not text:
+        return ""
+    for marker in _MAX_GUESTS_FALLBACK_CUT_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            text = text[:idx]
+            break
+    else:
+        text = text[:_MAX_GUESTS_FALLBACK_HEAD_CHARS]
+    m = MAX_GUESTS_PATTERN.search(text)
+    return m.group(1) if m else ""
 
 
 def _extract_max_guests(response) -> str:
-    """Extract maximum number of guests allowed (shown under listing name). Returns empty string if not found."""
-    text = _response_text(response)
-    m = MAX_GUESTS_PATTERN.search(text)
-    return m.group(1) if m else ""
+    """Extract maximum number of guests from the listing overview. Returns empty string if not found."""
+    out = _max_guests_from_overview_dom(response)
+    if out:
+        return out
+    return _max_guests_fallback_limited_regex(response)
 
 
 # Host overview lives in embedded PDP JSON as PdpHostOverviewDefaultSection (stable __typename).
@@ -1156,18 +1294,22 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         listing_id = _listing_key(response.url) if "/rooms/" in response.url else ""
 
         # Zyte httpResponseBody returns a response that is not text-like; .xpath() raises NotSupported.
-        # Build an HtmlResponse from decoded body so _extract_location / _extract_max_guests can use .xpath().
+        # Build an HtmlResponse from decoded body so location / max_guests / coordinates use the DOM.
         html_response = HtmlResponse(url=response.url, body=text.encode("utf-8"), encoding="utf-8")
         location = _extract_location(html_response)
+        # Approximate map coordinates when present (preferred over `location` for boundary/municipality checks).
+        latitude, longitude = _extract_coordinates(html_response)
         max_guests = _extract_max_guests(html_response)
         property_name = _extract_property_name(html_response)
-        picture_url = _extract_picture_url(text)
+        picture_url = extract_picture_url(html_response, text)
         host_fields = _extract_host_fields(text)
         rating_fields = _extract_rating_and_reviews(text)
 
         item = AirbnbListingItem(
             url=response.url,
             location=location,
+            latitude=latitude,
+            longitude=longitude,
             registration_number=registration_number,
             description_text=description_text,
             listing_id=listing_id,
