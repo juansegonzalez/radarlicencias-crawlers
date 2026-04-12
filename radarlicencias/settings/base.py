@@ -47,3 +47,6 @@ FEED_EXPORT_ENCODING = "utf-8"
 
 # Logging
 LOG_LEVEL = "INFO"
+
+# Optional: Airbnb Mallorca run-over-run stats baseline (see docs/AIRBNB_PRODUCTION.md).
+# Example in settings/local.py: AIRBNB_MALLORCA_STATS_BASELINE_PATH = "/tmp/airbnb_mallorca_stats_baseline.json"

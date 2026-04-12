@@ -6,6 +6,7 @@
 import json
 import os
 import re
+import tempfile
 import scrapy
 import base64
 from scrapy.exceptions import NotSupported
@@ -561,6 +562,93 @@ def _inc_airbnb_stat(spider, key: str, value: int = 1) -> None:
     c = getattr(spider, "crawler", None)
     if c and c.stats:
         c.stats.inc_value(f"airbnb_mallorca/{key}", value)
+
+
+# Optional run-over-run baseline (see closed() and docs/AIRBNB_PRODUCTION.md).
+_BASELINE_MIN_ITEMS_FOR_COMPARE = 50
+_BASELINE_SPAIN_SHARE_RISE_PCT_POINTS = 10.0
+_BASELINE_COORDS_PRESENT_DROP_PCT_POINTS = 10.0
+
+
+def _airbnb_stats_baseline_path(spider) -> str | None:
+    """Path to JSON snapshot from a previous crawl; set via env or Scrapy settings."""
+    p = os.environ.get("AIRBNB_MALLORCA_STATS_BASELINE_PATH")
+    if not p and getattr(spider, "settings", None):
+        p = spider.settings.get("AIRBNB_MALLORCA_STATS_BASELINE_PATH")
+    return p.strip() if p else None
+
+
+def _read_airbnb_stats_baseline(path: str) -> dict | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except OSError:
+        return None
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_airbnb_stats_baseline(path: str, snapshot: dict) -> None:
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _warn_airbnb_baseline_drift(logger, baseline: dict, g, items_total: int) -> None:
+    """Compare current crawl to a previous snapshot; log WARNING on large registration/geo shifts."""
+    try:
+        prev_n = int(baseline.get("items_total") or 0)
+        prev_spain = int(
+            baseline.get("registration_source_spain_national_derived")
+            or baseline.get("spain_national_derived")
+            or 0
+        )
+        prev_coords = int(baseline.get("coordinates_present") or 0)
+    except (TypeError, ValueError):
+        return
+    if prev_n < _BASELINE_MIN_ITEMS_FOR_COMPARE or items_total < _BASELINE_MIN_ITEMS_FOR_COMPARE:
+        return
+
+    prev_spain_share = float(prev_spain) / float(prev_n)
+    cur_spain = g("registration_source_spain_national_derived")
+    cur_spain_share = float(cur_spain) / float(items_total)
+
+    if (cur_spain_share - prev_spain_share) * 100.0 >= _BASELINE_SPAIN_SHARE_RISE_PCT_POINTS:
+        logger.warning(
+            "Airbnb Mallorca drift (vs baseline): registration_source_spain_national_derived share rose by "
+            "%.1f pp (baseline %.3f on %s items, current %.3f on %s items)",
+            (cur_spain_share - prev_spain_share) * 100.0,
+            prev_spain_share,
+            prev_n,
+            cur_spain_share,
+            items_total,
+        )
+
+    prev_coord_share = float(prev_coords) / float(prev_n)
+    cur_coords = g("coordinates_present")
+    cur_coord_share = float(cur_coords) / float(items_total)
+
+    if (prev_coord_share - cur_coord_share) * 100.0 >= _BASELINE_COORDS_PRESENT_DROP_PCT_POINTS:
+        logger.warning(
+            "Airbnb Mallorca drift (vs baseline): coordinates_present share dropped by "
+            "%.1f pp (baseline %.3f on %s items, current %.3f on %s items)",
+            (prev_coord_share - cur_coord_share) * 100.0,
+            prev_coord_share,
+            prev_n,
+            cur_coord_share,
+            items_total,
+        )
 
 
 # Production monitoring: map extraction provenance to stable stat keys (see docs/AIRBNB_PRODUCTION.md).
@@ -1503,13 +1591,14 @@ class AirbnbMallorcaSpider(scrapy.Spider):
 
     def _yield_detail_request(self, listing_id: str, zyte_detail: dict):
         """Schedule one listing detail request with global dedup and stats."""
-        _inc_airbnb_stat(self, "discovered_listing_ids_total")
         url = f"https://www.airbnb.com/rooms/{listing_id}"
         key = _listing_key(url)
         if key in self._seen_listing_keys:
             _inc_airbnb_stat(self, "duplicate_listing_ids_skipped")
             return
         self._seen_listing_keys.add(key)
+        # Unique listing IDs only (deduped); matches detail_pages_scheduled.
+        _inc_airbnb_stat(self, "discovered_listing_ids_total")
         _inc_airbnb_stat(self, "detail_pages_scheduled")
         yield scrapy.Request(
             url,
@@ -1725,7 +1814,6 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             listing_id = _extract_listing_id_from_result(result)
             if not listing_id:
                 continue
-            _inc_airbnb_stat(self, "discovered_listing_ids_total")
             url = f"https://www.airbnb.com/rooms/{listing_id}"
             key = _listing_key(url)
             if key in self._seen_listing_keys:
@@ -1733,6 +1821,7 @@ class AirbnbMallorcaSpider(scrapy.Spider):
                 continue
             self._seen_listing_keys.add(key)
             new_unique += 1
+            _inc_airbnb_stat(self, "discovered_listing_ids_total")
             _inc_airbnb_stat(self, "detail_pages_scheduled")
             yield scrapy.Request(
                 url,
@@ -1835,6 +1924,12 @@ class AirbnbMallorcaSpider(scrapy.Spider):
                 return 0.0
             return 100.0 * float(part) / float(whole)
 
+        def fmt_pct(part: int, whole: int) -> str:
+            """Safe for items_total == 0 (no division by zero; show n/a instead of 0.0%)."""
+            if whole <= 0:
+                return "n/a"
+            return f"{pct(part, whole):.1f}%"
+
         items_total = g("items_total")
         miss_coord = g("items_missing_coordinates")
         miss_reg = g("items_missing_registration")
@@ -1855,10 +1950,10 @@ class AirbnbMallorcaSpider(scrapy.Spider):
             f"- pagination_recovered_ids: {g('risky_leaf_pagination_unique_ids_recovered')}",
             "",
             "COMPLETENESS",
-            f"- missing_coordinates: {miss_coord} ({pct(miss_coord, items_total):.1f}%)",
-            f"- missing_registration: {miss_reg} ({pct(miss_reg, items_total):.1f}%)",
-            f"- missing_title: {miss_title} ({pct(miss_title, items_total):.1f}%)",
-            f"- missing_max_guests: {miss_mg} ({pct(miss_mg, items_total):.1f}%)",
+            f"- missing_coordinates: {miss_coord} ({fmt_pct(miss_coord, items_total)})",
+            f"- missing_registration: {miss_reg} ({fmt_pct(miss_reg, items_total)})",
+            f"- missing_title: {miss_title} ({fmt_pct(miss_title, items_total)})",
+            f"- missing_max_guests: {miss_mg} ({fmt_pct(miss_mg, items_total)})",
             "",
             "MAX_GUESTS",
             f"- overview_dom: {g('max_guests_source_overview_dom')}",
@@ -1884,6 +1979,35 @@ class AirbnbMallorcaSpider(scrapy.Spider):
         ]
         summary = "\n".join(lines)
         self.logger.info("\n%s", summary)
+
+        baseline_path = _airbnb_stats_baseline_path(self)
+        if baseline_path and items_total > 0:
+            prev = _read_airbnb_stats_baseline(baseline_path)
+            if prev:
+                _warn_airbnb_baseline_drift(self.logger, prev, g, items_total)
+            write_baseline = os.environ.get("AIRBNB_MALLORCA_STATS_BASELINE_WRITE", "1").strip().lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+            if write_baseline:
+                try:
+                    _write_airbnb_stats_baseline(
+                        baseline_path,
+                        {
+                            "items_total": items_total,
+                            "registration_source_spain_national_derived": g(
+                                "registration_source_spain_national_derived"
+                            ),
+                            "coordinates_present": g("coordinates_present"),
+                        },
+                    )
+                except OSError as exc:
+                    self.logger.warning(
+                        "Could not write stats baseline to %s: %s",
+                        baseline_path,
+                        exc,
+                    )
 
         if items_total > 0:
             if pct(miss_coord, items_total) > 5.0:

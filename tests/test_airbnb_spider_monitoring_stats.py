@@ -4,7 +4,11 @@ import unittest
 from unittest.mock import MagicMock
 
 from radarlicencias.items import AirbnbListingItem
-from radarlicencias.spiders.airbnb_mallorca import _record_airbnb_detail_monitoring_stats
+from radarlicencias.spiders.airbnb_mallorca import (
+    AirbnbMallorcaSpider,
+    _record_airbnb_detail_monitoring_stats,
+    _warn_airbnb_baseline_drift,
+)
 
 
 class _DummyStats:
@@ -71,6 +75,71 @@ class TestAirbnbMonitoringStats(unittest.TestCase):
         self.assertEqual(st.counts.get("airbnb_mallorca/max_guests_value_above_16"), 1)
         self.assertEqual(st.counts.get("airbnb_mallorca/max_guests_source_overview_dom"), 1)
         self.assertEqual(st.counts.get("airbnb_mallorca/registration_source_none"), 1)
+
+    def test_discovered_listing_ids_unique_not_per_attempt(self):
+        spider = AirbnbMallorcaSpider()
+        spider._seen_listing_keys = set()
+        spider.crawler = MagicMock()
+        spider.crawler.stats = _DummyStats()
+        zyte = {"httpResponseBody": True}
+        listing_id = "12345678"
+        list(spider._yield_detail_request(listing_id, zyte))
+        list(spider._yield_detail_request(listing_id, zyte))
+        st = spider.crawler.stats
+        self.assertEqual(st.counts.get("airbnb_mallorca/discovered_listing_ids_total"), 1)
+        self.assertEqual(st.counts.get("airbnb_mallorca/detail_pages_scheduled"), 1)
+        self.assertEqual(st.counts.get("airbnb_mallorca/duplicate_listing_ids_skipped"), 1)
+
+    def test_baseline_warns_on_spain_share_rise(self):
+        logger = MagicMock()
+        baseline = {
+            "items_total": 100,
+            "registration_source_spain_national_derived": 5,
+            "coordinates_present": 95,
+        }
+
+        def g(key: str) -> int:
+            return {
+                "registration_source_spain_national_derived": 30,
+                "coordinates_present": 95,
+            }.get(key, 0)
+
+        _warn_airbnb_baseline_drift(logger, baseline, g, 100)
+        logger.warning.assert_called()
+
+    def test_baseline_warns_on_coordinates_present_drop(self):
+        logger = MagicMock()
+        baseline = {
+            "items_total": 100,
+            "registration_source_spain_national_derived": 5,
+            "coordinates_present": 95,
+        }
+
+        def g(key: str) -> int:
+            return {
+                "registration_source_spain_national_derived": 5,
+                "coordinates_present": 70,
+            }.get(key, 0)
+
+        _warn_airbnb_baseline_drift(logger, baseline, g, 100)
+        logger.warning.assert_called()
+
+    def test_baseline_skips_small_samples(self):
+        logger = MagicMock()
+        baseline = {
+            "items_total": 10,
+            "registration_source_spain_national_derived": 1,
+            "coordinates_present": 9,
+        }
+
+        def g(key: str) -> int:
+            return {
+                "registration_source_spain_national_derived": 9,
+                "coordinates_present": 1,
+            }.get(key, 0)
+
+        _warn_airbnb_baseline_drift(logger, baseline, g, 10)
+        logger.warning.assert_not_called()
 
 
 if __name__ == "__main__":

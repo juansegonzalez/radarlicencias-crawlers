@@ -51,11 +51,15 @@ In production (`httpResponseBody`), capacity often comes from **`embedded_json`*
 
 Stats are prefixed with `airbnb_mallorca/`. They are **monitoring-only**: they do not change crawling, pagination, or field extraction.
 
-**Discovery:** `discovered_listing_ids_total`, `detail_pages_scheduled`, `duplicate_listing_ids_skipped`, `risky_leaf_pagination_leaves_started`, `risky_leaf_pagination_unique_ids_recovered` (plus existing internal counters such as `stayssearch_nodes_visited`, `leaf_nodes`, …).
+**Discovery:** `discovered_listing_ids_total` counts **unique** listing IDs the first time they pass global dedup (same count as `detail_pages_scheduled`; duplicate appearances in StaysSearch results increment only `duplicate_listing_ids_skipped`). Also: `detail_pages_scheduled`, `duplicate_listing_ids_skipped`, `risky_leaf_pagination_leaves_started`, `risky_leaf_pagination_unique_ids_recovered` (plus existing internal counters such as `stayssearch_nodes_visited`, `leaf_nodes`, …).
 
 **Per detail item:** `items_total`, completeness (`items_missing_coordinates`, `items_missing_registration`, `items_missing_title`, `items_missing_max_guests`), `coordinates_missing` / `coordinates_present`, title quality (`title_rejected_invalid`, `title_short_length`), `max_guests_source_*` (overview_dom / embedded_json / limited_regex / none), registration source (`registration_source_*`), `max_guests_value_above_16`, `max_guests_value_zero_or_negative`. Legacy counters such as `items_with_registration`, `max_guests_emitted_from_*`, and `max_guests_validation_*` are still incremented for continuity.
 
-At spider shutdown, `closed()` logs a multi-line **`=== AIRBNB CRAWL SUMMARY ===`** block (percentages use `items_total`) and emits **WARNING** logs when configured drift thresholds are crossed (coordinates missing > 5%, registration missing > 10%, embedded_json share < 80%, or any `max_guests_value_above_16` > 0). Warnings do not stop the crawl.
+At spider shutdown, `closed()` logs a multi-line **`=== AIRBNB CRAWL SUMMARY ===`** block. Completeness percentages use `items_total` as the denominator; when `items_total` is 0, percentages are shown as `n/a` (no division by zero).
+
+**Same-run drift:** **WARNING** logs when configured thresholds are crossed (coordinates missing > 5%, registration missing > 10%, embedded_json share < 80%, or any `max_guests_value_above_16` > 0). Warnings do not stop the crawl.
+
+**Run-over-run drift (optional):** set `AIRBNB_MALLORCA_STATS_BASELINE_PATH` to a filesystem path (or `AIRBNB_MALLORCA_STATS_BASELINE_PATH` in Scrapy settings). If the file exists from a previous crawl, `closed()` may **WARNING** on a large rise in `registration_source_spain_national_derived` share or a large drop in `coordinates_present` share (minimum ~50 items on both sides). By default the crawl **writes** the current snapshot to the same path at the end of `closed()` for the next run; set `AIRBNB_MALLORCA_STATS_BASELINE_WRITE=0` to disable writing.
 
 ## Tests
 
