@@ -57,6 +57,7 @@ See [docs/LICENSE_PATTERNS_FROM_CONSEJO.md](docs/LICENSE_PATTERNS_FROM_CONSEJO.m
 
 The project is **ready to deploy** to Scrapy Cloud. For full steps (local test, deploy, feed, periodic jobs), see **[DEPLOY.md](DEPLOY.md)**.
 
+- **Unit tests:** `PYTHONPATH=. python -m unittest discover -s tests -p 'test_*.py' -v` (use a venv with dependencies from `requirements.txt`).
 - **Local test:** `SCRAPY_SETTINGS_MODULE=radarlicencias.settings.local scrapy crawl airbnb_mallorca`
 - **Airbnb:** disable risky-leaf StaysSearch pagination with `-a disable_risky_leaf_pagination=true` (default is enabled).
 - **Deploy:** `pip install shub && shub login && shub deploy`

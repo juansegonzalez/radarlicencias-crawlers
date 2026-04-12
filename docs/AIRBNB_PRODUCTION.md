@@ -61,9 +61,28 @@ At spider shutdown, `closed()` logs a multi-line **`=== AIRBNB CRAWL SUMMARY ===
 
 **Run-over-run drift (optional):** set `AIRBNB_MALLORCA_STATS_BASELINE_PATH` to a filesystem path (or `AIRBNB_MALLORCA_STATS_BASELINE_PATH` in Scrapy settings). If the file exists from a previous crawl, `closed()` may **WARNING** on a large rise in `registration_source_spain_national_derived` share or a large drop in `coordinates_present` share (minimum ~50 items on both sides). By default the crawl **writes** the current snapshot to the same path at the end of `closed()` for the next run; set `AIRBNB_MALLORCA_STATS_BASELINE_WRITE=0` to disable writing.
 
+Example snapshot JSON (keys may be sorted alphabetically on disk):
+
+```json
+{
+  "coordinates_present": 950,
+  "items_total": 1000,
+  "registration_source_spain_national_derived": 50
+}
+```
+
 ## Tests
 
 - `tests/test_airbnb_*.py`, `tests/test_license_registration.py` cover extraction rules.
+- **`tests/test_airbnb_spider_monitoring_stats.py`** checks production stat increments (including unique `discovered_listing_ids_total` vs duplicates) and optional run-over-run baseline drift helpers.
+
+From the project root:
+
+```bash
+PYTHONPATH=. python -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+Use the project virtual environment (`.venv`) so `scrapy` and dependencies resolve.
 
 ## Deploying to production
 

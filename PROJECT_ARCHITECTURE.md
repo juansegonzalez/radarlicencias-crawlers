@@ -110,6 +110,7 @@ Discover and crawl **Airbnb listings in Mallorca** (map-bounded island search), 
 - **Output**: Feed export on Scrapy Cloud (e.g. JSON Lines).
 - **Detail parsing**: [docs/AIRBNB_DETAIL_EXTRACTION.md](docs/AIRBNB_DETAIL_EXTRACTION.md); **production reference:** [docs/AIRBNB_PRODUCTION.md](docs/AIRBNB_PRODUCTION.md).  
   **`max_guests`:** overview DOM → **embedded JSON** (structured capacity) → limited header regex; values **> 16** are rejected. **`latitude` / `longitude`:** map `position` / JSON pairs.
+- **Monitoring**: Scrapy stats under `airbnb_mallorca/*`, end-of-run **`=== AIRBNB CRAWL SUMMARY ===`** in `closed()`, and optional drift thresholds (same-run and run-over-run baseline). Does not change crawling or extraction; see [docs/AIRBNB_PRODUCTION.md](docs/AIRBNB_PRODUCTION.md).
 
 ### Open points
 - If Airbnb changes the `StaysSearch` persisted query hash, update `STAYSSEARCH_HASH` in `airbnb_mallorca.py` (see comments in spider).
